@@ -205,6 +205,27 @@ void i2c_readbytes(byte address, byte cmd, byte bytecnt) {
   }
 }
 
+char* cleanStr(const char* _str) {
+  int x=0, i=0;
+  char c;
+  memset(str,0,sizeof(str)); // zero out array
+
+  while (((c = _str[i++]) != '\0') && (x<59)) { // read array until we hit a null
+    if (isPrintable(c)) str[x++] = c; // exclude character that are not alphaNumeric
+  }
+  str[x] = '\0'; // null terminate
+
+  return str; // return printable results
+}
+
+void wsSend(const char* _str) {
+  if (sizeof(_str)<=1) return; // don't send blank messages
+  if (wsConcount>0) {
+    for (int x=0; x<wsConcount; x++) {
+      webSocket.sendTXT(x, _str);
+    }
+  }
+}
 
 void i2c_scan() {
   scanI2C = false;
@@ -251,28 +272,6 @@ void httpUpdater() {
 
       case HTTP_UPDATE_OK:
         break;
-  }
-}
-
-char* cleanStr(const char* _str) {
-  int x=0, i=0;
-  char c;
-  memset(str,0,sizeof(str)); // zero out array
-
-  while (((c = _str[i++]) != '\0') && (x<59)) { // read array until we hit a null
-    if (isPrintable(c)) str[x++] = c; // exclude character that are not alphaNumeric
-  }
-  str[x] = '\0'; // null terminate
-
-  return str; // return printable results
-}
-
-void wsSend(const char* _str) {
-  if (sizeof(_str)<=1) return; // don't send blank messages
-  if (wsConcount>0) {
-    for (int x=0; x<wsConcount; x++) {
-      webSocket.sendTXT(x, _str);
-    }
   }
 }
 
@@ -511,6 +510,7 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
   memset(str,0,sizeof(str));
   sprintf(str,"sent # %d labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",_num,sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
   if (useMQTT) mqtt.publish(mqttpub, str);
+  wsSend(str);
   char labelStr[8];
   if (sw1>=0) {
     if (sw1type==0) strcpy(labelStr,"switch\0");
@@ -540,6 +540,7 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
     sprintf(str,"%s=%s",labelStr, sw4label);
     webSocket.sendTXT(_num, str);
   }
+  i2c_scan();
   newWScon = 0;
 }
 
@@ -1228,6 +1229,7 @@ void setup() {
   // setup i2c if configured
   if (hasI2C) {
     Wire.begin(iotSDA, iotSCL); // from api config file
+    
     //Wire.begin(12, 14); // from api config file
     i2c_scan();
 
