@@ -121,8 +121,7 @@ time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 Adafruit_ADS1115 ads;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
-OneWire oneWire(OWDAT); // one wire bus
-DallasTemperature ds18b20(&oneWire);
+DallasTemperature ds18b20 = NULL;
 ESP8266WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 
@@ -1069,6 +1068,13 @@ void setup() {
   memset(amps0Chr,0,sizeof(amps0Chr));
   memset(amps1Chr,0,sizeof(amps1Chr));
   memset(tmpChr,0,sizeof(tmpChr));
+
+  // Get this from config
+  int one_wire_pin = OWDAT;
+
+  OneWire oneWire(OWDAT); // one wire bus
+  ds18b20 = DallasTemperature(&oneWire);
+
 
   // if the program crashed, skip things that might make it crash
   String rebootMsg = ESP.getResetReason();
