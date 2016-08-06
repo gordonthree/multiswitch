@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Time.h>
-//#include <TimeLib.h>
 #include <FS.h>
 #include <Arduino.h>
 #include <ESP8266mDNS.h>
@@ -16,8 +15,8 @@
 #include <ESP8266httpUpdate.h>
 #include <ESP8266WebServer.h>
 #include <PubSubClient.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
+#include "OneWire.h"
+#include "DallasTemperature.h"
 #include <Adafruit_ADS1015.h>
 #include <Wire.h>
 
@@ -59,7 +58,7 @@ char sw1label[32], sw2label[32], sw3label[32], sw4label[32];
 char nodename[32];
 char mqttserver[32];
 char vdivsor[8];
-int OWDAT=13; // default to pin 13 for onewire
+int OWDAT=4; // default to pin 13 for onewire
 int  mqttport=0;
 char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
@@ -122,6 +121,7 @@ time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 Adafruit_ADS1115 ads;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
+OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
 ESP8266WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
@@ -1070,18 +1070,8 @@ void setup() {
   memset(amps0Chr,0,sizeof(amps0Chr));
   memset(amps1Chr,0,sizeof(amps1Chr));
   memset(tmpChr,0,sizeof(tmpChr));
-  // For testing only
-  OWDAT = 4;
 
-
-  // Get this from config
-  int one_wire_pin = OWDAT;
-
-  OneWire oneWire(OWDAT); // one wire bus
-  ds18b20 = DallasTemperature(&oneWire);
-
-
-  // if the program crashed, skip things that might make it crash
+    // if the program crashed, skip things that might make it crash
   String rebootMsg = ESP.getResetReason();
   if (rebootMsg=="Exception") safeMode=true;
   else if (rebootMsg=="Hardware Watchdog") safeMode=true;
@@ -1179,14 +1169,19 @@ void setup() {
     }
   }
 
-  // setup dallas one-wire temperature probes
-  if (hasTout) {
+OWDAT = 4;
+  if (OWDAT>=0) { // setup onewire if data line is using pin 0 or greater
+    oneWire.begin(OWDAT);
+    if (hasTout) {
+      ds18b20 = DallasTemperature(&oneWire);
+      ds18b20.begin(); // start one wire temp probe  
+    }
     if (hasTpwr>0) {
       pinMode(hasTpwr, OUTPUT); // onewire power pin as output
       digitalWrite(hasTpwr, LOW); // ow off
     }
-    ds18b20.begin(); // start one wire temp probe
   }
+
 
   if (useMQTT) {
     String rebootReason = String("Last reboot cause was ") + rebootMsg;
