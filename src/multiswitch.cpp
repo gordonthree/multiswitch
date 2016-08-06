@@ -22,18 +22,18 @@
 #include <Wire.h>
 
 // uncomment for ac switch module, leave comment for dc switch module
-//#define _ACMULTI true
+#define _ACMULTI true
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
   #define _ON 0
   #define _OFF 1
-  #define OWDAT 4 // onewire data usually on 4 for ac nodes, 13 for dc nodes
+  //#define OWDAT 4 // onewire data usually on 4 for ac nodes, 13 for dc nodes
   ADC_MODE(ADC_VCC);
 #else //driving mosfets, 1 is on, 0 is off
   #define _ON 1
   #define _OFF 0
   //#define OWDAT 13 // onewire data usually on 4 for ac nodes, 13 for dc nodes
-  #define OWDAT 4 // added for outdoor probe
+  //#define OWDAT 4 // added for outdoor probe
   //ADC_MODE(ADC_VCC); // added for outdoor probe
 #endif
 
@@ -59,6 +59,7 @@ char sw1label[32], sw2label[32], sw3label[32], sw4label[32];
 char nodename[32];
 char mqttserver[32];
 char vdivsor[8];
+int OWDAT=13; // default to pin 13 for onewire
 int  mqttport=0;
 char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
@@ -433,6 +434,7 @@ int loadConfig(bool setFSver) {
   hasSpeed = json["hasspeed"];
   hasRSSI = json["hasrssi"];
   hasTpwr = json["hastpwr"]; // also serves as OWPWR
+  OWDAT = json["owdat"]; // set onewire data pin
   hasI2C = json["hasi2c"];
   rawadc = json["rawadc"];
   hasI2Cpwr = json["hasi2cpwr"];
@@ -1068,6 +1070,9 @@ void setup() {
   memset(amps0Chr,0,sizeof(amps0Chr));
   memset(amps1Chr,0,sizeof(amps1Chr));
   memset(tmpChr,0,sizeof(tmpChr));
+  // For testing only
+  OWDAT = 4;
+
 
   // Get this from config
   int one_wire_pin = OWDAT;
