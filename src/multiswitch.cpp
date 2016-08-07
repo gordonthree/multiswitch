@@ -4,7 +4,7 @@
 #include <FS.h>
 #include <Arduino.h>
 #include <ESP8266mDNS.h>
-#include <WebSocketsServer.h>
+//#include <WebSocketsServer.h> now using arduinoWebSockets
 #include <Hash.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
@@ -14,16 +14,17 @@
 #include <ESP8266HTTPClient.h>
 #include <ESP8266httpUpdate.h>
 #include <ESP8266WebServer.h>
-#include <PubSubClient.h>
+// #include <PubSubClient.h> switching to AsyncMqttClient
 #include "OneWire.h"
 #include "DallasTemperature.h"
 #include <Adafruit_ADS1015.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
-
+#include <AsyncMqttClient.h>
+#include "WebSocketsServer.h" // local WebSocketsServer library, async enabled
 
 // uncomment for ac switch module, leave comment for dc switch module
-#define _ACMULTI true
+//#define _ACMULTI true
 // owdat is set by json config now!
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
@@ -36,7 +37,7 @@
   #define _OFF 0
 // ADC_MODE(ADC_VCC); // added for outdoor probe
 // #define OWDAT 13 // dc nodes are usualy using 13 for owdat, outdoor probes use 4
-  ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
+  //ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
 #endif
 
 const char* iotSrv = "192.168.2.30"; // automation api server name
@@ -128,7 +129,7 @@ time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 Adafruit_ADS1115 ads;
 WiFiClient espClient;
-PubSubClient mqtt(espClient);
+AsyncMqttClient mqtt;
 OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
 ESP8266WebServer server(80);
@@ -228,12 +229,15 @@ void wsSend(const char* _str) {
   }
 }
 
+void mqttPublish(const char* _topic, const char* _payload) {
+  if (useMQTT) mqtt.publish(_topic, 0, false, _payload); // publish at qos 0, do not retain
+}
 void i2c_scan() {
   scanI2C = false;
   byte error, address;
   int nDevices;
 
-  if (!useMQTT) mqtt.publish(mqttpub, "Scanning I2C Bus...");
+  if (!useMQTT) mqttPublish(mqttpub, "Scanning I2C Bus...");
 
   nDevices = 0;
   for(address = 1; address < 127; address++ ) {
@@ -247,14 +251,13 @@ void i2c_scan() {
       sprintf(str,"i2c dev %d: %x", nDevices, address);
       wsSend(str);
       if (!useMQTT) {
-        mqtt.publish(mqttpub, str);
-        mqtt.loop();
+        mqttPublish(mqttpub, str);
       }
       delay(10);
       nDevices++;
     }
   }
-  if (!useMQTT) mqtt.publish(mqttpub, "I2C scan complete.");
+  if (!useMQTT) mqttPublish(mqttpub, "I2C scan complete.");
 }
 
 void httpUpdater() {
@@ -262,12 +265,12 @@ void httpUpdater() {
 
   switch(ret) {
       case HTTP_UPDATE_FAILED:
-        if (useMQTT) mqtt.publish(mqttpub, "FW update failed");
+        mqttPublish(mqttpub, "FW update failed");
         delay(10);
         break;
 
       case HTTP_UPDATE_NO_UPDATES:
-        if (useMQTT) mqtt.publish(mqttpub, "No FW update available");
+        mqttPublish(mqttpub, "No FW update available");
         delay(10);
         break;
 
@@ -512,7 +515,7 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
   int _num = _x - 1; // client number is one less
   memset(str,0,sizeof(str));
   sprintf(str,"sent # %d labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",_num,sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
-  if (useMQTT) mqtt.publish(mqttpub, str);
+  mqttPublish(mqttpub, str);
   wsSend(str);
   char labelStr[8];
   if (sw1>=0) {
@@ -733,13 +736,13 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
   else if (strcmp(cmdTxt, "uploadurl")==0) {
     strcpy(fileURL, cmdVal);
     sprintf(str, "Confirm: fileURL=%s", fileURL);
-    if (useMQTT) mqtt.publish(mqttpub, str);
+    mqttPublish(mqttpub, str);
     if (fileSet) doUpload = true;
   }
   else if (strcmp(cmdTxt, "updatefile")==0) {
     strcpy(fileName, cmdVal);
     sprintf(str, "Confirm: fileName=%s", fileName);
-    if (useMQTT) mqtt.publish(mqttpub, str);
+    mqttPublish(mqttpub, str);
     fileSet = true;
   }
   else {
@@ -777,15 +780,15 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           //USE_SERIAL.printf("[%u] Disconnected!\n", num);
           wsConcount--;
           sprintf(str,"ws Disconnect count=%d",wsConcount);
-          if (useMQTT) mqtt.publish(mqttpub,str);
+          mqttPublish(mqttpub,str);
           break;
       case WStype_CONNECTED:
           {
               IPAddress ip = webSocket.remoteIP(num);
-              sprintf(str,"[%u] connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+              // sprintf(str,"[%u] connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
               //USE_SERIAL.println();
               // send message to client
-              sprintf(str,"Connection #%d.", num);
+              sprintf(str,"Connection #%u", num);
               webSocket.sendTXT(num, str);
               sprintf(str, "name=%s", nodename);
               webSocket.sendTXT(num, str);
@@ -793,12 +796,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
               //webSocket.sendTXT(num, mqttsub);
               if (timeStatus() == timeSet) webSocket.sendTXT(num, "Time is set.");
               else webSocket.sendTXT(num, "Time not set.");
-              //mqtt.publish(mqttpub, str);
+              //mqttPublish(mqttpub, str);
               //wsSendlabels();
               newWScon = num + 1;
               wsConcount++;
               sprintf(str,"ws Connect count=%d",wsConcount);
-              if (useMQTT) mqtt.publish(mqttpub,str);
+              mqttPublish(mqttpub,str);
           }
           break;
       case WStype_TEXT:
@@ -814,6 +817,14 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           // webSocket.sendBIN(num, payload, lenght);
           break;
   }
+}
+
+void onMqttMessage(char* topic, char* payload, uint8_t qos, size_t len, size_t index, size_t total) {
+  skipSleep=true; // don't go to sleep if we receive mqtt message
+  char tmp[200];
+  strncpy(tmp, payload, len);
+  tmp[len] = '\0';
+  handleMsg(tmp);
 }
 
 bool loadFromSpiffs(String path){
@@ -947,38 +958,31 @@ time_t getNtptime() {
   return epoch;
 }
 
-void mqttcallback(char* topic, byte* payload, unsigned int len) {
-  skipSleep=true; // don't go to sleep if we receive mqtt message
-  char tmp[200];
-  strncpy(tmp, (char*)payload, len);
-  tmp[len] = 0x00;
-  handleMsg(tmp);
-}
-
-void mqttreconnect() {
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
   // Loop until we're reconnected
-  if (!useMQTT) return; // bail out if mqtt is not configured
+  if (!useMQTT) return; // bail out if mqtt is not enabled
+
   int retry = 0;
+
   if (mqttFail>=100) { // repeated mqtt failure could mean network trouble, reboot esp
     ESP.reset();
   }
+
   while (!mqtt.connected()) {
-    // Attempt to connect
-    if (mqtt.connect(nodename)) {
-      // Once connected, publish an announcement...
-      mqtt.publish(mqttpub, "Hello, world!");
-      //mqtt.publish(mqttpub, macStr);
-      // ... and resubscribe
-      mqtt.subscribe(mqttsub);
-    } else {
-      // Wait before retrying
-      delay(100);
-    }
+    mqtt.connect();// Attempt to connect
+    delay(100); // Wait before retrying
     if (retry++ > 4) {
-      mqttFail++;
+      mqttFail++; // increment reconnect failure counter
       return; // bail out after 5 attempts
     }
   }
+}
+
+void onMqttConnect() {
+  // Once connected, publish an announcement...
+  mqttPublish(mqttpub, "Hello, world!");
+  // subscribe to command topic
+  mqtt.subscribe(mqttsub,0);
 }
 
 void setupOTA() { // init arduino ide ota library
@@ -1006,22 +1010,24 @@ void setupOTA() { // init arduino ide ota library
 void setupMQTT() {
   if (mqttport>0) { // port defined, setup connection
     useMQTT = true; // set a flag that mqtt is in use
+    mqtt.onConnect(onMqttConnect);
+    mqtt.onDisconnect(onMqttDisconnect);
+    mqtt.onMessage(onMqttMessage); // install function to handle incoming mqtt messages
+    mqtt.setClientId(nodename);
+    mqtt.setKeepAlive(5);
     mqtt.setServer(mqttserver, mqttport); // setup mqtt broker connection
-    mqtt.setCallback(mqttcallback); // install function to handle incoming mqtt messages
-    mqttreconnect(); // check mqqt status
+    mqtt.connect(); // get connected!
   }
 }
-
-
 
 void updateNTP() {
   getTime = false;
   time_t epoch = getNtptime();
   if (epoch == 0) {
-    if (useMQTT) mqtt.publish(mqttpub, "Time not set, NTP unavailable.");
+    mqttPublish(mqttpub, "Time not set, NTP unavailable.");
   } else {
     setTime(epoch); // set software rtc to current time
-    if (useMQTT) mqtt.publish(mqttpub, "Time set from NTP server.");
+    mqttPublish(mqttpub, "Time set from NTP server.");
   }
 }
 
@@ -1064,36 +1070,36 @@ void mqttSendTime(time_t _time) {
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
-  mqtt.publish(mqttpub, str);
+  mqttPublish(mqttpub, str);
 }
 
 void mqttData() { // send mqtt messages as required
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
   if (hasRGB) return; // feature disabled if we're an rgb controller
-  if (hasTout) mqtt.publish(mqttpub, tmpChr);
+  if (hasTout) mqttPublish(mqttpub, tmpChr);
 
   if (timeStatus() == timeSet) mqttSendTime(now());
 
   if (hasIout) {
-    mqtt.publish(mqttpub, amps0Chr);
+    mqttPublish(mqttpub, amps0Chr);
     sprintf(str,"raw0=%d", raw0);
-    if (rawadc) mqtt.publish(mqttpub, str);
+    if (rawadc) mqttPublish(mqttpub, str);
 
-    mqtt.publish(mqttpub, amps1Chr);
+    mqttPublish(mqttpub, amps1Chr);
     sprintf(str,"raw1=%d", raw1);
-    if (rawadc) mqtt.publish(mqttpub, str);
+    if (rawadc) mqttPublish(mqttpub, str);
 
-    mqtt.publish(mqttpub, voltsChr);
+    mqttPublish(mqttpub, voltsChr);
     sprintf(str,"raw2=%d", raw2);
-    if (rawadc) mqtt.publish(mqttpub, str);
+    if (rawadc) mqttPublish(mqttpub, str);
   }
 
   if (hasVout) {
-    mqtt.publish(mqttpub, voltsChr);
-    if (rawadc) mqtt.publish(mqttpub, adcChr);
+    mqttPublish(mqttpub, voltsChr);
+    if (rawadc) mqttPublish(mqttpub, adcChr);
   }
 
-  if (hasRSSI) mqtt.publish(mqttpub, rssiChr);
+  if (hasRSSI) mqttPublish(mqttpub, rssiChr);
 }
 
 void doRGB() { // send updated values to the first four channels of the pwm chip
@@ -1236,8 +1242,9 @@ void setup() {
 
     if (hasIout) setupADS();
   }
+  sprintf(str,"owdat=%u",OWDAT);
+  mqttPublish(mqttpub, str);
 
-OWDAT = 4;
   if (OWDAT>=0) { // setup onewire if data line is using pin 0 or greater
     oneWire.begin(OWDAT);
     if (hasTout) {
@@ -1254,7 +1261,7 @@ OWDAT = 4;
   if (useMQTT) {
     String rebootReason = String("Last reboot cause was ") + rebootMsg;
     rebootReason.toCharArray(str, rebootReason.length()+1);
-    mqtt.publish(mqttpub, str);
+    mqttPublish(mqttpub, str);
   }
 }
 
@@ -1374,8 +1381,8 @@ void doIout() { // enable current reporting if module is so equipped
 void runUpdate() { // test for http update flag, received url via mqtt
   doUpdate = false; // clear flag
   updateCnt = 0; // clear update counter
-  if (useMQTT) mqtt.publish(mqttpub, "Checking for updates");
-  if (useMQTT) mqtt.loop();
+  mqttPublish(mqttpub, "Checking for updates");
+  wsSend("Checking for updates");
   delay(50);
   getConfig();
   httpUpdater();
@@ -1389,10 +1396,6 @@ void loop() {
     }
   }
 
-  if (!mqtt.connected()) {
-    mqttreconnect(); // check mqqt status
-  }
-
   doTick();
 
   if (hasRSSI) doRSSI();
@@ -1403,18 +1406,18 @@ void loop() {
   if ( (doUpdate) || (updateCnt>= 60 / ((updateRate * 20) / 1000) ) ) runUpdate(); // check for config update as requested or every 60 loops
 
   if (wsConcount>0) wsData();
-  if (useMQTT) mqttData();
+  mqttData();
 
-  sprintf(str,"Sleeping in %u seconds.", (updateRate*20/1000));
   if ((!skipSleep) && (sleepEn)) {
-    if (useMQTT) mqtt.publish(mqttpub, str);
+    sprintf(str,"Sleeping in %u seconds.", (updateRate*20/1000));
+    mqttPublish(mqttpub, str);
+    wsSend(str);
   }
 
   int cnt = 30;
   if (updateRate>30) cnt=updateRate;
   while(cnt--) {
     ArduinoOTA.handle();
-    if (useMQTT) mqtt.loop();
 
     server.handleClient();
     webSocket.loop();
@@ -1427,19 +1430,17 @@ void loop() {
       doUpload = false; fileSet = false;
       int stat = uploadFile(fileName, fileURL);
       sprintf(str, "Upload complete: %s %d bytes.",fileName,stat);
-      if (useMQTT) mqtt.publish(mqttpub, str);
+      mqttPublish(mqttpub, str);
     }
 
     if (setPolo) {
       setPolo = false; // respond to an mqtt 'ping' of sorts
-      if (useMQTT) mqtt.publish(mqttpub, "Polo");
+      mqttPublish(mqttpub, "Polo");
     }
 
     if (doReset) { // reboot on command
-      if (useMQTT) {
-        mqtt.publish(mqttpub, "Rebooting!");
-        mqtt.loop();
-      }
+      mqttPublish(mqttpub, "Rebooting!");
+      wsSend("Rebooting!");
       delay(50);
       ESP.reset();
     }
@@ -1450,10 +1451,8 @@ void loop() {
   if ((!skipSleep) && (sleepEn)) {
     if ((sleepPeriod<60) || (sleepPeriod>43200)) sleepPeriod=900; // prevent sleeping for less than 1 minute or more than 12 hours
     sprintf(myChr,"Back in %d minutes", sleepPeriod/60);
-    if (useMQTT) {
-      mqtt.publish(mqttpub, myChr);
-      mqtt.loop();
-    }
+    mqttPublish(mqttpub, myChr);
+    wsSend(myChr);
 
     ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
 
