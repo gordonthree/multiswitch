@@ -112,8 +112,6 @@ bool hasI2Cpwr = false; // has i2c bus power control
 bool rawadc = false; // output raw internal adc reading
 bool doReset = false; // flag for reboot
 bool hasHostname = false; // flag for hostname being set by saved config
-bool scanI2C = false;
-bool rgbTest = false;
 unsigned char ntpOffset = 4; // offset from GMT
 uint8_t iotSDA = 12, iotSCL = 14; // i2c bus pins
 
@@ -233,11 +231,9 @@ void mqttPublish(const char* _topic, const char* _payload) {
   if (useMQTT) mqtt.publish(_topic, 0, false, _payload); // publish at qos 0, do not retain
 }
 void i2c_scan() {
-  scanI2C = false;
-  byte error, address;
-  int nDevices;
+  uint8_t error, address, nDevices;
 
-  if (!useMQTT) mqttPublish(mqttpub, "Scanning I2C Bus...");
+  mqttPublish(mqttpub, "Scanning I2C Bus...");
 
   nDevices = 0;
   for(address = 1; address < 127; address++ ) {
@@ -250,14 +246,12 @@ void i2c_scan() {
     if (error == 0) {
       sprintf(str,"i2c dev %d: %x", nDevices, address);
       wsSend(str);
-      if (!useMQTT) {
-        mqttPublish(mqttpub, str);
-      }
+      mqttPublish(mqttpub, str);
       delay(10);
       nDevices++;
     }
   }
-  if (!useMQTT) mqttPublish(mqttpub, "I2C scan complete.");
+  mqttPublish(mqttpub, "I2C scan complete.");
 }
 
 void httpUpdater() {
@@ -726,8 +720,6 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
 
   if (strcmp(cmdTxt, "marco")==0) setPolo = true;
   else if (strcmp(cmdTxt, "update")==0) doUpdate = true;
-  else if (strcmp(cmdTxt, "rgbtest")==0) rgbTest = true;
-  else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
   else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
   else if (strcmp(cmdTxt, "green")==0) green = atoi(cmdVal);
@@ -1067,7 +1059,6 @@ void wsData() { // send some websockets data if client is connected
 
 void mqttSendTime(time_t _time) {
   if (hasRGB) return; // feature disabled if we're an rgb controller
-  if (!mqtt.connected()) return; // bail out if there's no mqtt connection
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
   mqttPublish(mqttpub, str);
@@ -1110,24 +1101,6 @@ void doRGB() { // send updated values to the first four channels of the pwm chip
   pwm.setPWM(3, 0, white);
 }
 
-void testRGB() {
-  red=4096; blue=0; green=0; white=0;
-  doRGB();
-  delay(250);
-  red=0; blue=4096; green=0; white=0;
-  doRGB();
-  delay(250);
-  red=0; blue=0; green=4096; white=0;
-  doRGB();
-  delay(250);
-  red=0; blue=0; green=0; white=4096;
-  doRGB();
-  delay(250);
-  red=0; blue=0; green=0; white=0;
-  doRGB();
-  rgbTest = false;
-}
-
 void setupRGB() { // init pca9685 pwm chip
   pwm.begin(); // default address is 40
   pwm.setPWMFreq(200);  // This is the maximum PWM frequency
@@ -1137,7 +1110,6 @@ void setupRGB() { // init pca9685 pwm chip
     pwm.setPWM(i, 0, 0);
     delay(10);
   }
-  testRGB();
 }
 
 void setupADS() {
@@ -1424,8 +1396,6 @@ void loop() {
 
     if (getTime) updateNTP(); // update time if requested by command
     if (hasRGB) doRGB(); // rgb updates as fast as possible
-    if (scanI2C) i2c_scan();
-    if (rgbTest) testRGB();
     if (doUpload) { // upload file to spiffs by command
       doUpload = false; fileSet = false;
       int stat = uploadFile(fileName, fileURL);
