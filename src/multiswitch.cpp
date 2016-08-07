@@ -19,21 +19,24 @@
 #include "DallasTemperature.h"
 #include <Adafruit_ADS1015.h>
 #include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
 
 // uncomment for ac switch module, leave comment for dc switch module
 #define _ACMULTI true
+// owdat is set by json config now!
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
   #define _ON 0
   #define _OFF 1
-  //#define OWDAT 4 // onewire data usually on 4 for ac nodes, 13 for dc nodes
+  //#define OWDAT 4 // owdat usually on 4 for ac nodes, 13 for dc nodes
   ADC_MODE(ADC_VCC);
 #else //driving mosfets, 1 is on, 0 is off
   #define _ON 1
   #define _OFF 0
-  //#define OWDAT 13 // onewire data usually on 4 for ac nodes, 13 for dc nodes
-  //#define OWDAT 4 // added for outdoor probe
-  //ADC_MODE(ADC_VCC); // added for outdoor probe
+// ADC_MODE(ADC_VCC); // added for outdoor probe
+// #define OWDAT 13 // dc nodes are usualy using 13 for owdat, outdoor probes use 4
+  ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
 #endif
 
 const char* iotSrv = "192.168.2.30"; // automation api server name
@@ -47,10 +50,10 @@ char voltsChr[10];
 char amps0Chr[10];
 char amps1Chr[10];
 char adcChr[10];
-int wsConcount=0;
+unsigned char wsConcount=0;
 int raw0=0, raw1=0, raw2=0;
 char tmpChr[10];
-byte mac[6];
+unsigned char mac[6];
 char macStr[12];
 char url[100];
 char str[60];
@@ -64,7 +67,8 @@ char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
 char fsversion[6]; // storage for spiffs image version
 char theURL[128];
-byte i2cbuff[30];
+char i2cbuff[30];
+unsigned char sw1type=0, sw2type=0, sw3type=0, sw4type=0; // 0=swtich, 1=amps only, 2=rgbw
 char fileName[32] = { 0 };
 char fileURL[100] = { 0 };
 float vccDivisor = 16.306;
@@ -76,13 +80,15 @@ int sleepPeriod = 900;
 int vccOffset = 0;
 int ACSoffset = 1641;
 int updateRate = 30;
-byte updateCnt = 0;
-byte newWScon = 0;
-byte mqttFail = 0;
+unsigned int red=0,green=0,blue=0,white=0;
+unsigned char updateCnt = 0;
+unsigned char newWScon = 0;
+unsigned char mqttFail = 0;
 int sw1 = -1, sw2 = -1, sw3 = -1, sw4 = -1;
 bool altAdcvbat = false;
 bool safeMode = false;
 bool getTime = false;
+bool hasRGB = false;
 bool hasSerial = false;
 bool doUpload = false;
 bool fileSet = false;
@@ -99,14 +105,16 @@ bool hasIout = false; // output ADS current readings
 bool hasVout = false; // output voltage / onboard adc
 bool hasSpeed = false; // has pwm speed control chip (unimplemented)
 bool hasRSSI = false; // output RSSI
-byte hasTpwr = false; // has dallas power control (pin number)
+unsigned char hasTpwr = false; // has dallas power control (pin number)
 bool hasI2C = false; // has i2c bus
 bool hasI2Cpwr = false; // has i2c bus power control
 bool rawadc = false; // output raw internal adc reading
 bool doReset = false; // flag for reboot
 bool hasHostname = false; // flag for hostname being set by saved config
-byte ntpOffset = 4; // offset from GMT
-int iotSDA = 12, iotSCL = 14; // i2c bus pins
+bool scanI2C = false;
+bool rgbTest = false;
+unsigned char ntpOffset = 4; // offset from GMT
+uint8_t iotSDA = 12, iotSCL = 14; // i2c bus pins
 
 int ch1fnc = 0, ch2fnc = 0,ch3fnc = 0, ch4fnc = 0;
 int ch1on = 0, ch2on = 0, ch3on = 0, ch4on = 0;
@@ -117,7 +125,7 @@ time_t ch2start = 0, ch2end = 0, ch2rest = 0;
 time_t ch3start = 0, ch3end = 0, ch3rest = 0;
 time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 
-
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 Adafruit_ADS1115 ads;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -198,56 +206,6 @@ void i2c_readbytes(byte address, byte cmd, byte bytecnt) {
   }
 }
 
-
-void i2c_scan() {
-  byte error, address;
-  int nDevices;
-
-  mqtt.publish(mqttpub, "Scanning I2C Bus...");
-
-  nDevices = 0;
-  for(address = 1; address < 127; address++ ) {
-    // The i2c_scanner uses the return value of
-    // the Write.endTransmisstion to see if
-    // a device did acknowledge to the address.
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-
-    if (error == 0) {
-      sprintf(str,"i2c dev %d: %x", nDevices, address);
-      mqtt.publish(mqttpub, str);
-      mqtt.loop();
-      delay(10);
-      nDevices++;
-    }
-  }
-  mqtt.publish(mqttpub, "I2C scan complete.");
-}
-
-void httpUpdater() {
-  t_httpUpdate_return ret = ESPhttpUpdate.update(iotSrv, iotPort, theURL, fwversion);
-
-  switch(ret) {
-      case HTTP_UPDATE_FAILED:
-        mqtt.publish(mqttpub, "FW update failed");
-        mqtt.loop();
-        delay(10);
-        break;
-
-      case HTTP_UPDATE_NO_UPDATES:
-        mqtt.publish(mqttpub, "No FW update available");
-        mqtt.loop();
-        delay(10);
-        break;
-
-      case HTTP_UPDATE_OK:
-        mqtt.publish(mqttpub, "FW update succeeded");
-        mqtt.loop();
-        delay(10);
-        break;
-  }
-}
-
 char* cleanStr(const char* _str) {
   int x=0, i=0;
   char c;
@@ -267,6 +225,54 @@ void wsSend(const char* _str) {
     for (int x=0; x<wsConcount; x++) {
       webSocket.sendTXT(x, _str);
     }
+  }
+}
+
+void i2c_scan() {
+  scanI2C = false;
+  byte error, address;
+  int nDevices;
+
+  if (!useMQTT) mqtt.publish(mqttpub, "Scanning I2C Bus...");
+
+  nDevices = 0;
+  for(address = 1; address < 127; address++ ) {
+    // The i2c_scanner uses the return value of
+    // the Write.endTransmisstion to see if
+    // a device did acknowledge to the address.
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0) {
+      sprintf(str,"i2c dev %d: %x", nDevices, address);
+      wsSend(str);
+      if (!useMQTT) {
+        mqtt.publish(mqttpub, str);
+        mqtt.loop();
+      }
+      delay(10);
+      nDevices++;
+    }
+  }
+  if (!useMQTT) mqtt.publish(mqttpub, "I2C scan complete.");
+}
+
+void httpUpdater() {
+  t_httpUpdate_return ret = ESPhttpUpdate.update(iotSrv, iotPort, theURL, fwversion);
+
+  switch(ret) {
+      case HTTP_UPDATE_FAILED:
+        if (useMQTT) mqtt.publish(mqttpub, "FW update failed");
+        delay(10);
+        break;
+
+      case HTTP_UPDATE_NO_UPDATES:
+        if (useMQTT) mqtt.publish(mqttpub, "No FW update available");
+        delay(10);
+        break;
+
+      case HTTP_UPDATE_OK:
+        break;
   }
 }
 
@@ -428,6 +434,7 @@ int loadConfig(bool setFSver) {
   mqttport = json["mqttport"];
   ver = json["cfgversion"];
   useGetvcc = json["usegetvcc"];
+  hasRGB = json["hasrgb"];
   hasTout = json["hastout"];
   hasVout = json["hasvout"];
   hasIout = json["hasiout"];
@@ -449,9 +456,14 @@ int loadConfig(bool setFSver) {
   if (firstBoot) { // only do this at startup, resetting switches to database values
     // setup switch pins
     sw1 = json["sw1pin"];
+    sw1type = json["sw1type"];
     sw2 = json["sw2pin"];
+    sw2type = json["sw2type"];
     sw3 = json["sw3pin"];
+    sw3type = json["sw3type"];
     sw4 = json["sw4pin"];
+    sw4type = json["sw4type"];
+
     byte tempsw1 = json["sw1en"];
     byte tempsw2 = json["sw2en"];
     byte tempsw3 = json["sw3en"];
@@ -499,25 +511,39 @@ byte checkSw(byte pin) {
 void wsSendlabels(byte _x) { // send switch labels only to newly connected websocket client
   int _num = _x - 1; // client number is one less
   memset(str,0,sizeof(str));
-  sprintf(str,"client # %d sent labels for pins: sw1=%d sw2=%d sw3=%d sw4=%d",_num,sw1,sw2,sw3,sw4);
+  sprintf(str,"sent # %d labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",_num,sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
   if (useMQTT) mqtt.publish(mqttpub, str);
-
+  wsSend(str);
+  char labelStr[8];
   if (sw1>=0) {
-    sprintf(str,"switch=%s",sw1label);
+    if (sw1type==0) strcpy(labelStr,"switch\0");
+    else if (sw1type==1) strcpy(labelStr,"label\0");
+    else if (sw1type==2) strcpy(labelStr,"rgb\0");
+    sprintf(str,"%s=%s",labelStr, sw1label);
     webSocket.sendTXT(_num, str);
   }
   if (sw2>=0) {
-    sprintf(str,"switch=%s",sw2label);
+    if (sw2type==0) strcpy(labelStr,"switch\0");
+    else if (sw2type==1) strcpy(labelStr,"label\0");
+    else if (sw2type==2) strcpy(labelStr,"rgb\0");
+    sprintf(str,"%s=%s",labelStr, sw2label);
     webSocket.sendTXT(_num, str);
   }
   if (sw3>=0) {
-    sprintf(str,"switch=%s",sw3label);
+    if (sw3type==0) strcpy(labelStr,"switch\0");
+    else if (sw3type==1) strcpy(labelStr,"label\0");
+    else if (sw3type==2) strcpy(labelStr,"rgb\0");
+    sprintf(str,"%s=%s",labelStr, sw3label);
     webSocket.sendTXT(_num, str);
   }
   if (sw4>=0) {
-    sprintf(str,"switch=%s",sw4label);
+    if (sw4type==0) strcpy(labelStr,"switch\0");
+    else if (sw4type==1) strcpy(labelStr,"label\0");
+    else if (sw4type==2) strcpy(labelStr,"rgb\0");
+    sprintf(str,"%s=%s",labelStr, sw4label);
     webSocket.sendTXT(_num, str);
   }
+  i2c_scan();
   newWScon = 0;
 }
 
@@ -691,36 +717,40 @@ void getConfig() {
 }
 
 void handleMsg(char* cmdStr) { // handle commands from mqtt broker
-  String cmdTxt = String(strtok(cmdStr, "="));
-  String cmdVal = String(strtok(NULL, "="));
+  // using c string routines instead of Arduino String routines ... a lot faster
+  char* cmdTxt = strtok(cmdStr, "=");
+  char* cmdVal = strtok(NULL, "=");
 
-  if (cmdTxt == "marco") setPolo = true;
-  else if (cmdTxt == "update") doUpdate = true;
-  else if (cmdTxt == "reboot") doReset = true;
-  else if (cmdTxt == "gettime") getTime = true;
-  else if (cmdTxt == "uploadurl") {
-    cmdVal.toCharArray(str, cmdVal.length()+1);
-    strcpy(fileURL, str);
+  if (strcmp(cmdTxt, "marco")==0) setPolo = true;
+  else if (strcmp(cmdTxt, "update")==0) doUpdate = true;
+  else if (strcmp(cmdTxt, "rgbtest")==0) rgbTest = true;
+  else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
+  else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
+  else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "green")==0) green = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "blue")==0) blue = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "white")==0) white = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "uploadurl")==0) {
+    strcpy(fileURL, cmdVal);
     sprintf(str, "Confirm: fileURL=%s", fileURL);
-    mqtt.publish(mqttpub, str);
+    if (useMQTT) mqtt.publish(mqttpub, str);
     if (fileSet) doUpload = true;
   }
-  else if (cmdTxt == "uploadfile") {
-    cmdVal.toCharArray(str, cmdVal.length()+1);
-    strcpy(fileName, str);
+  else if (strcmp(cmdTxt, "updatefile")==0) {
+    strcpy(fileName, cmdVal);
     sprintf(str, "Confirm: fileName=%s", fileName);
-    mqtt.publish(mqttpub, str);
+    if (useMQTT) mqtt.publish(mqttpub, str);
     fileSet = true;
   }
   else {
-    int i = cmdVal.toInt();
-    if      (cmdTxt == "ch1on")  ch1on = i;
-    else if (cmdTxt == "ch1off") ch1off = i;
-    else if (cmdTxt == "ch2on")  ch2on = i;
-    else if (cmdTxt == "ch2off") ch2off = i;
-    else if (cmdTxt == "ch1fnc") ch1fnc = i;
-    else if (cmdTxt == "ch2fnc") ch2fnc = i;
-    else if (cmdTxt == "ch1en") {
+    int i = atoi(cmdVal);
+    if      (strcmp(cmdTxt, "ch1on")==0)  ch1on = i;
+    else if (strcmp(cmdTxt, "ch1off")==0) ch1off = i;
+    else if (strcmp(cmdTxt, "ch2on")==0)  ch2on = i;
+    else if (strcmp(cmdTxt, "ch2off")==0) ch2off = i;
+    else if (strcmp(cmdTxt, "ch1fnc")==0) ch1fnc = i;
+    else if (strcmp(cmdTxt, "ch2fnc")==0) ch2fnc = i;
+    else if (strcmp(cmdTxt, "ch1en")==0) {
       if (i == 1) startCh1(); // ON
       else {
         ch1fnc = 0; // switch to manual mode
@@ -729,7 +759,7 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
         //wsSend("CH1 Manual Off");
       }
     }
-    else if (cmdTxt == "ch2en") {
+    else if (strcmp(cmdTxt, "ch2en")==0) {
       if (i == 1) startCh2(); // ON
       else {
         ch2fnc = 0; // switch to manual mode
@@ -747,7 +777,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           //USE_SERIAL.printf("[%u] Disconnected!\n", num);
           wsConcount--;
           sprintf(str,"ws Disconnect count=%d",wsConcount);
-          mqtt.publish(mqttpub,str);
+          if (useMQTT) mqtt.publish(mqttpub,str);
           break;
       case WStype_CONNECTED:
           {
@@ -768,19 +798,13 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
               newWScon = num + 1;
               wsConcount++;
               sprintf(str,"ws Connect count=%d",wsConcount);
-              mqtt.publish(mqttpub,str);
+              if (useMQTT) mqtt.publish(mqttpub,str);
           }
           break;
       case WStype_TEXT:
-         // USE_SERIAL.printf("[%u] get Text: %s\n", num, payload);
-          //USE_SERIAL.println();
           payload[length] = '\0'; // null terminate
           handleMsg((char *)payload);
-          // send message to client
-          // webSocket.sendTXT(num, "message here");
 
-          // send data to all connected clients
-          // webSocket.broadcastTXT("message here");
           break;
       case WStype_BIN:
          // USE_SERIAL.printf("[%u] get binary lenght: %u\n", num, length);
@@ -933,6 +957,7 @@ void mqttcallback(char* topic, byte* payload, unsigned int len) {
 
 void mqttreconnect() {
   // Loop until we're reconnected
+  if (!useMQTT) return; // bail out if mqtt is not configured
   int retry = 0;
   if (mqttFail>=100) { // repeated mqtt failure could mean network trouble, reboot esp
     ESP.reset();
@@ -987,6 +1012,8 @@ void setupMQTT() {
   }
 }
 
+
+
 void updateNTP() {
   getTime = false;
   time_t epoch = getNtptime();
@@ -1001,9 +1028,12 @@ void updateNTP() {
 void wsData() { // send some websockets data if client is connected
   if (wsConcount<=0) return;
 
-  if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
+  if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
+  else if (!hasRGB) wsSwitchstatus(); // regular upgrades for other node types
 
-  wsSwitchstatus(); // update switch status for ws clients
+  if (hasRGB) return; // stop here if we're an rgb controller
+
+  if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
 
   if (hasVout) { // send bat/vcc string
     wsSend(voltsChr);
@@ -1030,14 +1060,16 @@ void wsData() { // send some websockets data if client is connected
 }
 
 void mqttSendTime(time_t _time) {
+  if (hasRGB) return; // feature disabled if we're an rgb controller
+  if (!mqtt.connected()) return; // bail out if there's no mqtt connection
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
   mqtt.publish(mqttpub, str);
 }
 
 void mqttData() { // send mqtt messages as required
-  if (!mqtt.connected()) return;
-
+  if (!mqtt.connected()) return; // bail out if there's no mqtt connection
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   if (hasTout) mqtt.publish(mqttpub, tmpChr);
 
   if (timeStatus() == timeSet) mqttSendTime(now());
@@ -1064,6 +1096,49 @@ void mqttData() { // send mqtt messages as required
   if (hasRSSI) mqtt.publish(mqttpub, rssiChr);
 }
 
+void doRGB() { // send updated values to the first four channels of the pwm chip
+  // need to expand this to support four 4-channel groups, some sort of array probably
+  pwm.setPWM(0, 0, red);
+  pwm.setPWM(1, 0, blue);
+  pwm.setPWM(2, 0, green);
+  pwm.setPWM(3, 0, white);
+}
+
+void testRGB() {
+  red=4096; blue=0; green=0; white=0;
+  doRGB();
+  delay(250);
+  red=0; blue=4096; green=0; white=0;
+  doRGB();
+  delay(250);
+  red=0; blue=0; green=4096; white=0;
+  doRGB();
+  delay(250);
+  red=0; blue=0; green=0; white=4096;
+  doRGB();
+  delay(250);
+  red=0; blue=0; green=0; white=0;
+  doRGB();
+  rgbTest = false;
+}
+
+void setupRGB() { // init pca9685 pwm chip
+  pwm.begin(); // default address is 40
+  pwm.setPWMFreq(200);  // This is the maximum PWM frequency
+
+  // set all 16 channels on pwm chip to 0,0 - full off
+  for (uint8_t i=0; i<16; i++) {
+    pwm.setPWM(i, 0, 0);
+    delay(10);
+  }
+  testRGB();
+}
+
+void setupADS() {
+  ads.begin();
+  ads.setGain(GAIN_ONE);
+  ads.setSPS(ADS1115_DR_64SPS);
+}
 
 void setup() {
   memset(voltsChr,0,sizeof(voltsChr));
@@ -1083,24 +1158,21 @@ void setup() {
   }
   if (sw2>=0) {
     pinMode(sw2, OUTPUT);
-    //digitalWrite(sw2, _OFF);
   }
   if (sw3>=0) {
     pinMode(sw3, OUTPUT);
   }
   if (sw4>=0) {
     pinMode(sw4, OUTPUT);
-    // digitalWrite(sw1, _OFF);
   }
 
-  // delay(100); // finsih bootup?
   // "mount" the filesystem
   bool success = SPIFFS.begin();
   if (!success) SPIFFS.format();
 
-  if (!safeMode) fsConfig(); // read config from FS
+  if (!safeMode) fsConfig(); // read node config from FS
 
-  // init wifimanager library
+  // init wifimanager library and network connection
   WiFiManager wifiManager;
 
   if (hasHostname) { // valid config found on FS, set network name
@@ -1109,7 +1181,7 @@ void setup() {
     MDNS.begin(nodename); // set mDNS hostname
   }
 
-  wifiManager.setDebugOutput(false); // disable serial port debug messages
+  wifiManager.setDebugOutput(hasSerial); // set or disable serial debug
   wifiManager.setTimeout(180);  // if autoconnect fails, wait for 3 minutes for user intervention before sleeping
 
   WiFi.macAddress(mac); // get esp mac address, store it in memory, build fw update url
@@ -1155,18 +1227,14 @@ void setup() {
 
   // setup i2c if configured
   if (hasI2C) {
-    //Wire.begin(iotSDA, iotSCL); // from api config file
-    Wire.begin(12, 14); // from api config file
+    Wire.begin(iotSDA, iotSCL); // from api config file
+
+    //Wire.begin(12, 14); // from api config file
     i2c_scan();
 
-    if (hasIout) { // setup ADS1115 analog digital converter
-      ads.begin();
-      ads.setGain(GAIN_ONE);
-      ads.setSPS(ADS1115_DR_64SPS);
+    if (hasRGB) setupRGB();
 
-      //adc0zero = ads.readADC_SingleEnded(0);
-      //adc1zero = ads.readADC_SingleEnded(1);
-    }
+    if (hasIout) setupADS();
   }
 
 OWDAT = 4;
@@ -1174,7 +1242,7 @@ OWDAT = 4;
     oneWire.begin(OWDAT);
     if (hasTout) {
       ds18b20 = DallasTemperature(&oneWire);
-      ds18b20.begin(); // start one wire temp probe  
+      ds18b20.begin(); // start one wire temp probe
     }
     if (hasTpwr>0) {
       pinMode(hasTpwr, OUTPUT); // onewire power pin as output
@@ -1190,7 +1258,10 @@ OWDAT = 4;
   }
 }
 
+
+
 void doVout() {
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   int vBat=vccOffset;
   float voltage=0.00;
   String vStr;
@@ -1217,6 +1288,7 @@ void doRSSI() {
 }
 
 void doTout() {
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   String vStr;
   memset(tmpChr,0,sizeof(tmpChr));
   if (hasTpwr>0) {
@@ -1244,6 +1316,7 @@ void doTout() {
 
 
 void doIout() { // enable current reporting if module is so equipped
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   int16_t adc0, adc1, adc2, adc3;
   if (!hasI2C) return;
 
@@ -1301,13 +1374,12 @@ void doIout() { // enable current reporting if module is so equipped
 void runUpdate() { // test for http update flag, received url via mqtt
   doUpdate = false; // clear flag
   updateCnt = 0; // clear update counter
-  mqtt.publish(mqttpub, "Checking for updates");
-  mqtt.loop();
+  if (useMQTT) mqtt.publish(mqttpub, "Checking for updates");
+  if (useMQTT) mqtt.loop();
   delay(50);
   getConfig();
   httpUpdater();
 }
-
 
 void loop() {
   if (safeMode) { // safeMode engaged, enter blocking loop wait for an OTA update
@@ -1334,45 +1406,54 @@ void loop() {
   if (useMQTT) mqttData();
 
   sprintf(str,"Sleeping in %u seconds.", (updateRate*20/1000));
-  if ((!skipSleep) && (sleepEn)) mqtt.publish(mqttpub, str);
+  if ((!skipSleep) && (sleepEn)) {
+    if (useMQTT) mqtt.publish(mqttpub, str);
+  }
 
   int cnt = 30;
   if (updateRate>30) cnt=updateRate;
   while(cnt--) {
     ArduinoOTA.handle();
-    mqtt.loop();
+    if (useMQTT) mqtt.loop();
 
     server.handleClient();
     webSocket.loop();
-    if (getTime) updateNTP();
 
-    if (doUpload) {
+    if (getTime) updateNTP(); // update time if requested by command
+    if (hasRGB) doRGB(); // rgb updates as fast as possible
+    if (scanI2C) i2c_scan();
+    if (rgbTest) testRGB();
+    if (doUpload) { // upload file to spiffs by command
       doUpload = false; fileSet = false;
       int stat = uploadFile(fileName, fileURL);
       sprintf(str, "Upload complete: %s %d bytes.",fileName,stat);
-      mqtt.publish(mqttpub, str);
+      if (useMQTT) mqtt.publish(mqttpub, str);
     }
 
     if (setPolo) {
       setPolo = false; // respond to an mqtt 'ping' of sorts
-      mqtt.publish(mqttpub, "Polo");
+      if (useMQTT) mqtt.publish(mqttpub, "Polo");
     }
 
-    if (doReset) {
-      mqtt.publish(mqttpub, "Rebooting!");
-      mqtt.loop();
+    if (doReset) { // reboot on command
+      if (useMQTT) {
+        mqtt.publish(mqttpub, "Rebooting!");
+        mqtt.loop();
+      }
       delay(50);
       ESP.reset();
     }
 
-    delay(20);
+    if (!hasRGB) delay(20); // don't delay for rgb controller
   }
 
   if ((!skipSleep) && (sleepEn)) {
     if ((sleepPeriod<60) || (sleepPeriod>43200)) sleepPeriod=900; // prevent sleeping for less than 1 minute or more than 12 hours
-    sprintf(myChr,"Back in %d sec", sleepPeriod);
-    mqtt.publish(mqttpub, myChr);
-    mqtt.loop();
+    sprintf(myChr,"Back in %d minutes", sleepPeriod/60);
+    if (useMQTT) {
+      mqtt.publish(mqttpub, myChr);
+      mqtt.loop();
+    }
 
     ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
 
