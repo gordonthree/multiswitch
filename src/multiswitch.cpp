@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Time.h>
-//#include <TimeLib.h>
 #include <FS.h>
 #include <Arduino.h>
 #include <ESP8266mDNS.h>
@@ -113,7 +112,7 @@ bool hasHostname = false; // flag for hostname being set by saved config
 bool scanI2C = false;
 bool rgbTest = false;
 unsigned char ntpOffset = 4; // offset from GMT
-int iotSDA = 12, iotSCL = 14; // i2c bus pins
+uint8_t iotSDA = 12, iotSCL = 14; // i2c bus pins
 
 int ch1fnc = 0, ch2fnc = 0,ch3fnc = 0, ch4fnc = 0;
 int ch1on = 0, ch2on = 0, ch3on = 0, ch4on = 0;
@@ -433,6 +432,7 @@ int loadConfig(bool setFSver) {
   mqttport = json["mqttport"];
   ver = json["cfgversion"];
   useGetvcc = json["usegetvcc"];
+  hasRGB = json["hasrgb"];
   hasTout = json["hastout"];
   hasVout = json["hasvout"];
   hasIout = json["hasiout"];
@@ -714,42 +714,40 @@ void getConfig() {
 }
 
 void handleMsg(char* cmdStr) { // handle commands from mqtt broker
-  String cmdTxt = String(strtok(cmdStr, "="));
-  String cmdVal = String(strtok(NULL, "="));
+  // using c string routines instead of Arduino String routines ... a lot faster
+  char* cmdTxt = strtok(cmdStr, "=");
+  char* cmdVal = strtok(NULL, "=");
 
-  if (cmdTxt == "marco") setPolo = true;
-  else if (cmdTxt == "update") doUpdate = true;
-  else if (cmdTxt == "rgbtest") rgbTest = true;
-  else if (cmdTxt == "scani2c") scanI2C = true;
-  else if (cmdTxt == "reboot") doReset = true;
-  else if (cmdTxt == "gettime") getTime = true;
-  else if (cmdTxt == "red") red = cmdVal.toInt();
-  else if (cmdTxt == "green") green = cmdVal.toInt();
-  else if (cmdTxt == "blue") blue = cmdVal.toInt();
-  else if (cmdTxt == "white") white = cmdVal.toInt();
-  else if (cmdTxt == "uploadurl") {
-    cmdVal.toCharArray(str, cmdVal.length()+1);
-    strcpy(fileURL, str);
+  if (strcmp(cmdTxt, "marco")==0) setPolo = true;
+  else if (strcmp(cmdTxt, "update")==0) doUpdate = true;
+  else if (strcmp(cmdTxt, "rgbtest")==0) rgbTest = true;
+  else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
+  else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
+  else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "green")==0) green = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "blue")==0) blue = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "white")==0) white = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "uploadurl")==0) {
+    strcpy(fileURL, cmdVal);
     sprintf(str, "Confirm: fileURL=%s", fileURL);
     if (useMQTT) mqtt.publish(mqttpub, str);
     if (fileSet) doUpload = true;
   }
-  else if (cmdTxt == "uploadfile") {
-    cmdVal.toCharArray(str, cmdVal.length()+1);
-    strcpy(fileName, str);
+  else if (strcmp(cmdTxt, "updatefile")==0) {
+    strcpy(fileName, cmdVal);
     sprintf(str, "Confirm: fileName=%s", fileName);
     if (useMQTT) mqtt.publish(mqttpub, str);
     fileSet = true;
   }
   else {
-    int i = cmdVal.toInt();
-    if      (cmdTxt == "ch1on")  ch1on = i;
-    else if (cmdTxt == "ch1off") ch1off = i;
-    else if (cmdTxt == "ch2on")  ch2on = i;
-    else if (cmdTxt == "ch2off") ch2off = i;
-    else if (cmdTxt == "ch1fnc") ch1fnc = i;
-    else if (cmdTxt == "ch2fnc") ch2fnc = i;
-    else if (cmdTxt == "ch1en") {
+    int i = atoi(cmdVal);
+    if      (strcmp(cmdTxt, "ch1on")==0)  ch1on = i;
+    else if (strcmp(cmdTxt, "ch1off")==0) ch1off = i;
+    else if (strcmp(cmdTxt, "ch2on")==0)  ch2on = i;
+    else if (strcmp(cmdTxt, "ch2off")==0) ch2off = i;
+    else if (strcmp(cmdTxt, "ch1fnc")==0) ch1fnc = i;
+    else if (strcmp(cmdTxt, "ch2fnc")==0) ch2fnc = i;
+    else if (strcmp(cmdTxt, "ch1en")==0) {
       if (i == 1) startCh1(); // ON
       else {
         ch1fnc = 0; // switch to manual mode
@@ -758,7 +756,7 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
         //wsSend("CH1 Manual Off");
       }
     }
-    else if (cmdTxt == "ch2en") {
+    else if (strcmp(cmdTxt, "ch2en")==0) {
       if (i == 1) startCh2(); // ON
       else {
         ch2fnc = 0; // switch to manual mode
@@ -801,15 +799,9 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           }
           break;
       case WStype_TEXT:
-         // USE_SERIAL.printf("[%u] get Text: %s\n", num, payload);
-          //USE_SERIAL.println();
           payload[length] = '\0'; // null terminate
           handleMsg((char *)payload);
-          // send message to client
-          // webSocket.sendTXT(num, "message here");
 
-          // send data to all connected clients
-          // webSocket.broadcastTXT("message here");
           break;
       case WStype_BIN:
          // USE_SERIAL.printf("[%u] get binary lenght: %u\n", num, length);
@@ -1033,9 +1025,12 @@ void updateNTP() {
 void wsData() { // send some websockets data if client is connected
   if (wsConcount<=0) return;
 
-  if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
+  if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
+  else if (!hasRGB) wsSwitchstatus(); // regular upgrades for other node types
 
-  wsSwitchstatus(); // update switch status for ws clients
+  if (hasRGB) return; // stop here if we're an rgb controller
+
+  if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
 
   if (hasVout) { // send bat/vcc string
     wsSend(voltsChr);
@@ -1062,6 +1057,7 @@ void wsData() { // send some websockets data if client is connected
 }
 
 void mqttSendTime(time_t _time) {
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
@@ -1070,7 +1066,7 @@ void mqttSendTime(time_t _time) {
 
 void mqttData() { // send mqtt messages as required
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
-
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   if (hasTout) mqtt.publish(mqttpub, tmpChr);
 
   if (timeStatus() == timeSet) mqttSendTime(now());
@@ -1128,9 +1124,9 @@ void setupRGB() { // init pca9685 pwm chip
   pwm.setPWMFreq(200);  // This is the maximum PWM frequency
 
   // set all 16 channels on pwm chip to 0,0 - full off
-  for (char i=0; i<16; i++) {
+  for (uint8_t i=0; i<16; i++) {
     pwm.setPWM(i, 0, 0);
-    delay(5);
+    delay(10);
   }
   testRGB();
 }
@@ -1229,7 +1225,7 @@ void setup() {
   // setup i2c if configured
   if (hasI2C) {
     Wire.begin(iotSDA, iotSCL); // from api config file
-    
+
     //Wire.begin(12, 14); // from api config file
     i2c_scan();
 
@@ -1257,6 +1253,7 @@ void setup() {
 
 
 void doVout() {
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   int vBat=vccOffset;
   float voltage=0.00;
   String vStr;
@@ -1283,6 +1280,7 @@ void doRSSI() {
 }
 
 void doTout() {
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   String vStr;
   memset(tmpChr,0,sizeof(tmpChr));
   if (hasTpwr>0) {
@@ -1310,6 +1308,7 @@ void doTout() {
 
 
 void doIout() { // enable current reporting if module is so equipped
+  if (hasRGB) return; // feature disabled if we're an rgb controller
   int16_t adc0, adc1, adc2, adc3;
   if (!hasI2C) return;
 
@@ -1407,7 +1406,7 @@ void loop() {
   if (updateRate>30) cnt=updateRate;
   while(cnt--) {
     ArduinoOTA.handle();
-    mqtt.loop();
+    if (useMQTT) mqtt.loop();
 
     server.handleClient();
     webSocket.loop();
@@ -1437,7 +1436,7 @@ void loop() {
       ESP.reset();
     }
 
-    delay(20);
+    if (!hasRGB) delay(20); // don't delay for rgb controller
   }
 
   if ((!skipSleep) && (sleepEn)) {
