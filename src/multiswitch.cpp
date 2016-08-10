@@ -1146,7 +1146,8 @@ void setup() {
 
   // "mount" the filesystem
   bool success = SPIFFS.begin();
-  if (!success) SPIFFS.format();
+  if (!success) success = SPIFFS.format();
+  if (!success) safeMode = true; // failed to mount spiffs, failed to format spiffs, go to safemode
 
   if (!safeMode) fsConfig(); // read node config from FS
 
