@@ -1029,9 +1029,9 @@ void wsData() { // send some websockets data if client is connected
   if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
   else if (!hasRGB) wsSwitchstatus(); // regular upgrades for other node types
 
-  if (hasRGB) return; // stop here if we're an rgb controller
-
   if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
+
+  if (hasRGB) return; // stop here if we're an rgb controller
 
   if (hasVout) { // send bat/vcc string
     wsSend(voltsChr);
@@ -1096,8 +1096,8 @@ void mqttData() { // send mqtt messages as required
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
   pwm.setPWM(0, 0, red);
-  pwm.setPWM(1, 0, blue);
-  pwm.setPWM(2, 0, green);
+  pwm.setPWM(1, 0, green);
+  pwm.setPWM(2, 0, blue);
   pwm.setPWM(3, 0, white);
 }
 
@@ -1215,8 +1215,8 @@ void setup() {
 
     if (hasIout) setupADS();
   }
-  sprintf(str,"owdat=%u",OWDAT);
-  mqttPublish(mqttpub, str);
+  //sprintf(str,"owdat=%u",OWDAT);
+  //mqttPublish(mqttpub, str);
 
   if (OWDAT>=0) { // setup onewire if data line is using pin 0 or greater
     oneWire.begin(OWDAT);
@@ -1416,7 +1416,7 @@ void loop() {
       ESP.reset();
     }
 
-    if (!hasRGB) delay(20); // don't delay for rgb controller
+    delay(20); // don't delay for rgb controller
   }
 
   if ((!skipSleep) && (sleepEn)) {
