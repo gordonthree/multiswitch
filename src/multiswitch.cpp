@@ -24,7 +24,7 @@
 #include "WebSocketsServer.h" // local WebSocketsServer library, async enabled
 
 // uncomment for ac switch module, leave comment for dc switch module
-//#define _ACMULTI true
+#define _ACMULTI true
 // owdat is set by json config now!
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
@@ -86,6 +86,7 @@ unsigned char updateCnt = 0;
 unsigned char newWScon = 0;
 unsigned char mqttFail = 0;
 int sw1 = -1, sw2 = -1, sw3 = -1, sw4 = -1;
+bool resetWiFi = false; // flag to purge wifi config from nvram
 bool altAdcvbat = false;
 bool safeMode = false;
 bool getTime = false;
@@ -719,6 +720,7 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
   char* cmdVal = strtok(NULL, "=");
 
   if (strcmp(cmdTxt, "marco")==0) setPolo = true;
+  else if (strcmp(cmdTxt, "resetwifi")==0) resetWiFi = true;
   else if (strcmp(cmdTxt, "update")==0) doUpdate = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
   else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
@@ -957,7 +959,7 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
   int retry = 0;
 
   if (mqttFail>=100) { // repeated mqtt failure could mean network trouble, reboot esp
-    ESP.reset();
+    ESP.restart();
   }
 
   while (!mqtt.connected()) {
@@ -1161,7 +1163,7 @@ void setup() {
   }
 
   wifiManager.setDebugOutput(hasSerial); // set or disable serial debug
-  wifiManager.setTimeout(180);  // if autoconnect fails, wait for 3 minutes for user intervention before sleeping
+  wifiManager.setTimeout(300);  // if autoconnect fails, wait for 5 minutes for user intervention before timeout
 
   WiFi.macAddress(mac); // get esp mac address, store it in memory, build fw update url
   sprintf(macStr,"%x%x%x%x%x%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -1170,10 +1172,12 @@ void setup() {
 
   //fetches ssid and pass and tries to connect
   //if it does not connect it starts an access point with the specified name
-  //here  "AutoConnectAP"
   //and goes into a blocking loop awaiting configuration
-  if(!wifiManager.autoConnect("ESPSetup")) {
-    ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
+  if(!wifiManager.autoConnect()) {
+    // if sleeping is enabled, node might be battery powered, sleep for a bit after timeout
+    if (sleepEn) ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
+    // otherwise, just reboot
+    ESP.restart();
   }
 
   // request latest config from web api
@@ -1393,7 +1397,7 @@ void loop() {
     ArduinoOTA.handle();
 
     server.handleClient();
-    webSocket.loop();
+    // webSocket.loop(); // loop no longer required with async client
 
     if (getTime) updateNTP(); // update time if requested by command
     if (hasRGB) doRGB(); // rgb updates as fast as possible
@@ -1409,11 +1413,17 @@ void loop() {
       mqttPublish(mqttpub, "Polo");
     }
 
+    if (resetWiFi) {
+      WiFiManager wifiManager;
+      wifiManager.resetSettings(); // purge stored WiFi settings
+      ESP.restart(); // and reboot
+    }
+
     if (doReset) { // reboot on command
       mqttPublish(mqttpub, "Rebooting!");
       wsSend("Rebooting!");
       delay(50);
-      ESP.reset();
+      ESP.restart();
     }
 
     delay(20); // don't delay for rgb controller
