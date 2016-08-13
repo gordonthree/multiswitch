@@ -1,44 +1,31 @@
 #include <Arduino.h>
-#include <ArduinoJson.h>
 #include <Time.h>
 #include <FS.h>
-#include <Arduino.h>
-#include <ESP8266mDNS.h>
-//#include <WebSocketsServer.h> now using arduinoWebSockets
 #include <Hash.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
-#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
 #include <ESP8266HTTPClient.h>
 #include <ESP8266httpUpdate.h>
-#include <ESP8266WebServer.h>
-// #include <PubSubClient.h> switching to AsyncMqttClient
 #include "OneWire.h"
 #include "DallasTemperature.h"
 #include <Adafruit_ADS1015.h>
 #include <Wire.h>
-#include <Adafruit_PWMServoDriver.h>
 #include <AsyncMqttClient.h>
 #include "WebSocketsServer.h" // local WebSocketsServer library, async enabled
 
-// uncomment for ac switch module, leave comment for dc switch module
-#define _ACMULTI true
-// owdat is set by json config now!
-
-#ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
-  #define _ON 0
-  #define _OFF 1
-  //#define OWDAT 4 // owdat usually on 4 for ac nodes, 13 for dc nodes
-  ADC_MODE(ADC_VCC);
-#else //driving mosfets, 1 is on, 0 is off
-  #define _ON 1
-  #define _OFF 0
-// ADC_MODE(ADC_VCC); // added for outdoor probe
-// #define OWDAT 13 // dc nodes are usualy using 13 for owdat, outdoor probes use 4
-  //ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
+// selective includes depending on flash rom size
+// MINI version for 8mbit (1mbyte) modules
+#ifdef _MINI
+#include <ESP8266WiFiMulti.h>
+#else
+#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#include <ESP8266mDNS.h>
+#include <ESP8266WebServer.h>
+#include <Adafruit_PWMServoDriver.h> // no 1mbyte rgb modules
 #endif
+#include <ArduinoJson.h>
+
 
 const char* iotSrv = "192.168.2.30"; // automation api server name
 const char* jsonFile = "/iot.json"; // fs config filename
@@ -51,7 +38,10 @@ char voltsChr[10];
 char amps0Chr[10];
 char amps1Chr[10];
 char adcChr[10];
-unsigned char wsConcount=0;
+uint8_t nodeType=0; // default 0==dcmulti, 1==acmulti
+uint8_t _ON=1;
+uint8_t _OFF=0;
+uint8_t wsConcount=0;
 int raw0=0, raw1=0, raw2=0;
 char tmpChr[10];
 unsigned char mac[6];
@@ -62,14 +52,14 @@ char sw1label[32], sw2label[32], sw3label[32], sw4label[32];
 char nodename[32];
 char mqttserver[32];
 char vdivsor[8];
-int OWDAT=4; // default to pin 13 for onewire
-int  mqttport=0;
+uint8_t OWDAT=4; // default to pin 4 for onewire
+uint8_t mqttport=0;
 char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
 char fsversion[6]; // storage for spiffs image version
 char theURL[128];
 char i2cbuff[30];
-unsigned char sw1type=0, sw2type=0, sw3type=0, sw4type=0; // 0=swtich, 1=amps only, 2=rgbw
+uint8_t sw1type=0, sw2type=0, sw3type=0, sw4type=0; // 0=swtich, 1=amps only, 2=rgbw
 char fileName[32] = { 0 };
 char fileURL[100] = { 0 };
 float vccDivisor = 16.306;
@@ -116,24 +106,27 @@ bool hasHostname = false; // flag for hostname being set by saved config
 unsigned char ntpOffset = 4; // offset from GMT
 uint8_t iotSDA = 12, iotSCL = 14; // i2c bus pins
 
-int ch1fnc = 0, ch2fnc = 0,ch3fnc = 0, ch4fnc = 0;
-int ch1on = 0, ch2on = 0, ch3on = 0, ch4on = 0;
-int ch1off = 0, ch2off = 0, ch3off = 0, ch4off = 0;
-int ch1en = -1, ch2en = -1, ch3en = -1, ch4en = -1;
+uint8_t ch1fnc = 0, ch2fnc = 0,ch3fnc = 0, ch4fnc = 0;
+uint8_t ch1on = 0, ch2on = 0, ch3on = 0, ch4on = 0;
+uint8_t ch1off = 0, ch2off = 0, ch3off = 0, ch4off = 0;
+char ch1en = -1, ch2en = -1, ch3en = -1, ch4en = -1;
 time_t ch1start = 0, ch1end = 0, ch1rest = 0;
 time_t ch2start = 0, ch2end = 0, ch2rest = 0;
 time_t ch3start = 0, ch3end = 0, ch3rest = 0;
 time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 
-Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 Adafruit_ADS1115 ads;
 WiFiClient espClient;
 AsyncMqttClient mqtt;
 OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
-ESP8266WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
-
+#ifndef _MINI
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+ESP8266WebServer server(80);
+#else // use wifimulti for mini version
+ESP8266WiFiMulti wifiMulti;
+#endif
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
  *  Lookup the IP address for the host name instead */
 IPAddress timeServerIP; // time.nist.gov NTP server address
@@ -145,6 +138,7 @@ byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing pack
 // A UDP instance to let us send and receive packets over UDP
 WiFiUDP udp;
 
+#ifndef _MINI
 void i2c_wordwrite(int address, int cmd, int theWord) {
   //  Send output register address
   Wire.beginTransmission(address);
@@ -205,7 +199,9 @@ void i2c_readbytes(byte address, byte cmd, byte bytecnt) {
     i2cbuff[x] = Wire.read();
   }
 }
+#endif
 
+#ifndef _MINI
 char* cleanStr(const char* _str) {
   int x=0, i=0;
   char c;
@@ -218,6 +214,7 @@ char* cleanStr(const char* _str) {
 
   return str; // return printable results
 }
+#endif
 
 void wsSend(const char* _str) {
   if (sizeof(_str)<=1) return; // don't send blank messages
@@ -231,6 +228,8 @@ void wsSend(const char* _str) {
 void mqttPublish(const char* _topic, const char* _payload) {
   if (useMQTT) mqtt.publish(_topic, 0, false, _payload); // publish at qos 0, do not retain
 }
+
+#ifndef _MINI
 void i2c_scan() {
   uint8_t error, address, nDevices;
 
@@ -254,19 +253,23 @@ void i2c_scan() {
   }
   mqttPublish(mqttpub, "I2C scan complete.");
 }
+#endif
 
 void httpUpdater() {
   t_httpUpdate_return ret = ESPhttpUpdate.update(iotSrv, iotPort, theURL, fwversion);
+  int updateError = ESPhttpUpdate.getLastError();
 
   switch(ret) {
       case HTTP_UPDATE_FAILED:
-        mqttPublish(mqttpub, "FW update failed");
-        delay(10);
+        sprintf(str,"Update failed, error %d", updateError);
+        mqttPublish(mqttpub, str);
+        //delay(10);
         break;
 
       case HTTP_UPDATE_NO_UPDATES:
-        mqttPublish(mqttpub, "No FW update available");
-        delay(10);
+        sprintf(str,"No update (error %d)", updateError);
+        mqttPublish(mqttpub, str);
+        //delay(10);
         break;
 
       case HTTP_UPDATE_OK:
@@ -416,7 +419,7 @@ int loadConfig(bool setFSver) {
   if (json.containsKey("sw4label"))   strcpy(sw4label, json["sw4label"]);
   if (json.containsKey("mqttserver")) strcpy(mqttserver, json["mqttserver"]);
   if (json.containsKey("vccdivsor"))  vccDivisor = atof((const char*)json["vccdivsor"]);
-  if (json.containsKey("mvpera")) mvPerA = atof((const char*)json["mvpera"]);
+  if (json.containsKey("mvpera"))     mvPerA = atof((const char*)json["mvpera"]);
 
 
   if (json.containsKey("mqttpub")) {
@@ -450,6 +453,16 @@ int loadConfig(bool setFSver) {
   vccOffset = json["vccoffset"];
   updateRate = json["updaterate"];
   altAdcvbat = json["altadcvbat"];
+  nodeType = json["nodetype"];
+
+  if (nodeType==0){
+    _ON = 1; // mosfets are active high, so 1 is on
+    _OFF = 0;    
+  }
+  else if (nodeType==1){
+    _ON = 0;
+    _OFF = 1; // relays are active low, so 1 is off
+  }
 
   if (firstBoot) { // only do this at startup, resetting switches to database values
     // setup switch pins
@@ -541,14 +554,16 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
     sprintf(str,"%s=%s",labelStr, sw4label);
     webSocket.sendTXT(_num, str);
   }
+#ifndef _MINI  
   i2c_scan();
+#endif
   newWScon = 0;
 }
 
 void wsSwitchstatus() {
   char swChr[7];
   if (newWScon>0) wsSendlabels(newWScon);
-  memset(swChr,0,sizeof(swChr));
+  //memset(swChr,0,sizeof(swChr));
   if (ch1en>=0) {
     sprintf(swChr,"sw1=%u",ch1en);
     wsSend(swChr);
@@ -619,6 +634,7 @@ int requestConfig(bool save) {
   return ret;
 }
 
+#ifndef _MINI
 int uploadFile(const char* _filename, const char* _fileurl) { // upload new file to fs by downloading from a remote server, rather than reflash the entire spiffs
   int ret = false;
   HTTPClient http;
@@ -692,6 +708,7 @@ int uploadFile(const char* _filename, const char* _fileurl) { // upload new file
 
   return 0;
 }
+#endif
 
 void fsConfig() { // load config json from FS
   if (safeMode) return; // bail out if we're in safemode
@@ -821,6 +838,7 @@ void onMqttMessage(char* topic, char* payload, uint8_t qos, size_t len, size_t i
   handleMsg(tmp);
 }
 
+#ifndef _MINI
 bool loadFromSpiffs(String path){
   String dataType = "text/plain";
   if(path.endsWith("/")) path += "index.html";
@@ -862,6 +880,7 @@ void handleNotFound(){
   server.send(404, "text/plain", message);
   // Serial.println(message);
 }
+#endif
 
 void doTick() {
   time_t epoch = now();
@@ -1047,21 +1066,21 @@ void wsData() { // send some websockets data if client is connected
     sprintf(str,"raw0=%d", raw0);
     wsSend(amps0Chr);
     if (rawadc) wsSend(str);
-    memset(str,0,sizeof(str));
+    //memset(str,0,sizeof(str));
     sprintf(str,"raw1=%d", raw1);
     wsSend(amps1Chr);
     if (rawadc) wsSend(str);
-    memset(str,0,sizeof(str));
+    //memset(str,0,sizeof(str));
     sprintf(str,"raw2=%d", raw2);
     wsSend(voltsChr);
     if (rawadc) wsSend(str);
-    memset(str,0,sizeof(str));
+    //memset(str,0,sizeof(str));
   }
 }
 
 void mqttSendTime(time_t _time) {
   if (hasRGB) return; // feature disabled if we're an rgb controller
-  memset(str,0,sizeof(str));
+  //memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
   mqttPublish(mqttpub, str);
 }
@@ -1095,6 +1114,7 @@ void mqttData() { // send mqtt messages as required
   if (hasRSSI) mqttPublish(mqttpub, rssiChr);
 }
 
+#ifndef _MINI
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
   pwm.setPWM(0, 0, red);
@@ -1113,6 +1133,7 @@ void setupRGB() { // init pca9685 pwm chip
     delay(10);
   }
 }
+#endif
 
 void setupADS() {
   ads.begin();
@@ -1121,10 +1142,12 @@ void setupADS() {
 }
 
 void setup() {
+  /*
   memset(voltsChr,0,sizeof(voltsChr));
   memset(amps0Chr,0,sizeof(amps0Chr));
   memset(amps1Chr,0,sizeof(amps1Chr));
   memset(tmpChr,0,sizeof(tmpChr));
+  */
 
     // if the program crashed, skip things that might make it crash
   String rebootMsg = ESP.getResetReason();
@@ -1154,21 +1177,11 @@ void setup() {
   if (!safeMode) fsConfig(); // read node config from FS
 
   // init wifimanager library and network connection
+#ifndef _MINI 
   WiFiManager wifiManager;
-
-  if (hasHostname) { // valid config found on FS, set network name
-    WiFi.hostname(String(nodename)); // set network hostname
-    ArduinoOTA.setHostname(nodename);  // OTA hostname defaults to esp8266-[ChipID]
-    MDNS.begin(nodename); // set mDNS hostname
-  }
 
   wifiManager.setDebugOutput(hasSerial); // set or disable serial debug
   wifiManager.setTimeout(300);  // if autoconnect fails, wait for 5 minutes for user intervention before timeout
-
-  WiFi.macAddress(mac); // get esp mac address, store it in memory, build fw update url
-  sprintf(macStr,"%x%x%x%x%x%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  sprintf(theURL,"/iotfw?mac=%s", macStr);
-
 
   //fetches ssid and pass and tries to connect
   //if it does not connect it starts an access point with the specified name
@@ -1179,6 +1192,28 @@ void setup() {
     // otherwise, just reboot
     ESP.restart();
   }
+#else // _MINI is true, so use wifimulti to save some space
+  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
+  wifiMulti.addAP("dxTrailer", "2317239216");
+  
+  int cnt = 3000;
+  while(cnt-- && wifiMulti.run() != WL_CONNECTED) {
+    delay(100); // give wifi 5 minutes to connect
+  }  
+
+  if(wifiMulti.run() != WL_CONNECTED) {
+    ESP.restart(); // still no connection? reboot!
+  }
+#endif
+  WiFi.macAddress(mac); // get esp mac address, store it in memory, build fw update url
+  sprintf(macStr,"%x%x%x%x%x%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  sprintf(theURL,"/iotfw?mac=%s", macStr);
+
+  if (hasHostname) { // valid config found on FS, set network name
+    WiFi.hostname(nodename); // set network hostname
+    ArduinoOTA.setHostname(nodename);  // OTA hostname defaults to esp8266-[ChipID]
+  }
+
 
   // request latest config from web api
   if (!safeMode) getConfig();
@@ -1194,12 +1229,15 @@ void setup() {
   setSyncProvider(getNtptime); // use NTP to get current time
   setSyncInterval(600); // refresh clock every 10 min
 
+#ifndef _MINI
   // start the webserver
   server.onNotFound(handleNotFound);
   server.begin();
 
+  MDNS.begin(nodename); // set mDNS hostname
   // Add service to MDNS-SD
   MDNS.addService("http", "tcp", 80);
+#endif
 
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
@@ -1213,10 +1251,10 @@ void setup() {
     Wire.begin(iotSDA, iotSCL); // from api config file
 
     //Wire.begin(12, 14); // from api config file
+#ifndef _MINI
     i2c_scan();
-
     if (hasRGB) setupRGB();
-
+#endif
     if (hasIout) setupADS();
   }
   //sprintf(str,"owdat=%u",OWDAT);
@@ -1304,9 +1342,11 @@ void doIout() { // enable current reporting if module is so equipped
   int16_t adc0, adc1, adc2, adc3;
   if (!hasI2C) return;
 
+  /*
   memset(amps0Chr,0,sizeof(amps0Chr));
   memset(amps1Chr,0,sizeof(amps1Chr));
   memset(voltsChr,0,sizeof(voltsChr));
+  */
 
   adc0 = ads.readADC_SingleEnded(1) ; // adc channel 1 = switch 0 (switch one)
   raw0 = adc0;
@@ -1367,10 +1407,12 @@ void runUpdate() { // test for http update flag, received url via mqtt
 
 void loop() {
   if (safeMode) { // safeMode engaged, enter blocking loop wait for an OTA update
-    while (true) {
+    int cntDown = 30000; // 10 minutes 
+    while (cntDown--) {
       ArduinoOTA.handle();
       delay(20);
     }
+    ESP.restart(); // wait 10 minutes for rescure, then reboot
   }
 
   doTick();
@@ -1396,17 +1438,21 @@ void loop() {
   while(cnt--) {
     ArduinoOTA.handle();
 
+#ifndef _MINI
     server.handleClient();
+    if (hasRGB) doRGB(); // rgb updates as fast as possible
+#endif
     // webSocket.loop(); // loop no longer required with async client
 
     if (getTime) updateNTP(); // update time if requested by command
-    if (hasRGB) doRGB(); // rgb updates as fast as possible
+#ifndef _MINI    
     if (doUpload) { // upload file to spiffs by command
       doUpload = false; fileSet = false;
       int stat = uploadFile(fileName, fileURL);
       sprintf(str, "Upload complete: %s %d bytes.",fileName,stat);
       mqttPublish(mqttpub, str);
     }
+#endif
 
     if (setPolo) {
       setPolo = false; // respond to an mqtt 'ping' of sorts
@@ -1414,9 +1460,11 @@ void loop() {
     }
 
     if (resetWiFi) {
+#ifndef _MINI      
       WiFiManager wifiManager;
       wifiManager.resetSettings(); // purge stored WiFi settings
       ESP.restart(); // and reboot
+#endif
     }
 
     if (doReset) { // reboot on command
