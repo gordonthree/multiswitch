@@ -16,18 +16,19 @@
 
 // selective includes depending on flash rom size
 // MINI version for 8mbit (1mbyte) modules
-#ifdef _MINI
 #include <ESP8266WiFiMulti.h>
-#else
-#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#ifndef _MINI
 #include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
-#include <Adafruit_PWMServoDriver.h> // no 1mbyte rgb modules
 #endif
+#include <Adafruit_PWMServoDriver.h> // no 1mbyte rgb modules
 #include <ArduinoJson.h>
 
-
-const char* iotSrv = "192.168.2.30"; // automation api server name
+#ifdef _IOTSRV
+#define iotSrv  _IOTSRV // automation api server name
+#else
+const char* iotSrv = "mypi2";
+#endif
 const char* jsonFile = "/iot.json"; // fs config filename
 const int jsonSize = 1024;
 
@@ -121,24 +122,23 @@ AsyncMqttClient mqtt;
 OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
 WebSocketsServer webSocket = WebSocketsServer(81);
-#ifndef _MINI
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+#ifndef _MINI
 ESP8266WebServer server(80);
-#else // use wifimulti for mini version
-ESP8266WiFiMulti wifiMulti;
 #endif
+ESP8266WiFiMulti wifiMulti;
+
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
  *  Lookup the IP address for the host name instead */
 IPAddress timeServerIP; // time.nist.gov NTP server address
 unsigned int localPort = 2390;      // local port to listen for UDP packets
-const char* ntpServerName = "us.pool.ntp.org";
+char ntpServerName[60] = "us.pool.ntp.org";
 const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
 byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
 
 // A UDP instance to let us send and receive packets over UDP
 WiFiUDP udp;
 
-#ifndef _MINI
 void i2c_wordwrite(int address, int cmd, int theWord) {
   //  Send output register address
   Wire.beginTransmission(address);
@@ -199,9 +199,8 @@ void i2c_readbytes(byte address, byte cmd, byte bytecnt) {
     i2cbuff[x] = Wire.read();
   }
 }
-#endif
 
-#ifndef _MINI
+/*
 char* cleanStr(const char* _str) {
   int x=0, i=0;
   char c;
@@ -214,7 +213,7 @@ char* cleanStr(const char* _str) {
 
   return str; // return printable results
 }
-#endif
+*/
 
 void wsSend(const char* _str) {
   if (sizeof(_str)<=1) return; // don't send blank messages
@@ -229,7 +228,6 @@ void mqttPublish(const char* _topic, const char* _payload) {
   if (useMQTT) mqtt.publish(_topic, 0, false, _payload); // publish at qos 0, do not retain
 }
 
-#ifndef _MINI
 void i2c_scan() {
   uint8_t error, address, nDevices;
 
@@ -247,13 +245,11 @@ void i2c_scan() {
       sprintf(str,"i2c dev %d: %x", nDevices, address);
       wsSend(str);
       mqttPublish(mqttpub, str);
-      delay(10);
       nDevices++;
     }
   }
   mqttPublish(mqttpub, "I2C scan complete.");
 }
-#endif
 
 void httpUpdater() {
   t_httpUpdate_return ret = ESPhttpUpdate.update(iotSrv, iotPort, theURL, fwversion);
@@ -417,6 +413,7 @@ int loadConfig(bool setFSver) {
   if (json.containsKey("sw2label"))   strcpy(sw2label, json["sw2label"]);
   if (json.containsKey("sw3label"))   strcpy(sw3label, json["sw3label"]);
   if (json.containsKey("sw4label"))   strcpy(sw4label, json["sw4label"]);
+  if (json.containsKey("nptserver"))  strcpy(ntpServerName, json["nptserver"]);
   if (json.containsKey("mqttserver")) strcpy(mqttserver, json["mqttserver"]);
   if (json.containsKey("vccdivsor"))  vccDivisor = atof((const char*)json["vccdivsor"]);
   if (json.containsKey("mvpera"))     mvPerA = atof((const char*)json["mvpera"]);
@@ -554,9 +551,7 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
     sprintf(str,"%s=%s",labelStr, sw4label);
     webSocket.sendTXT(_num, str);
   }
-#ifndef _MINI  
   i2c_scan();
-#endif
   newWScon = 0;
 }
 
@@ -737,7 +732,6 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
   char* cmdVal = strtok(NULL, "=");
 
   if (strcmp(cmdTxt, "marco")==0) setPolo = true;
-  else if (strcmp(cmdTxt, "resetwifi")==0) resetWiFi = true;
   else if (strcmp(cmdTxt, "update")==0) doUpdate = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
   else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
@@ -1114,7 +1108,6 @@ void mqttData() { // send mqtt messages as required
   if (hasRSSI) mqttPublish(mqttpub, rssiChr);
 }
 
-#ifndef _MINI
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
   pwm.setPWM(0, 0, red);
@@ -1133,12 +1126,18 @@ void setupRGB() { // init pca9685 pwm chip
     delay(10);
   }
 }
-#endif
 
 void setupADS() {
   ads.begin();
   ads.setGain(GAIN_ONE);
   ads.setSPS(ADS1115_DR_64SPS);
+}
+
+void testWiFi() { // make sure we're connected to WiFi
+  if(wifiMulti.run() != WL_CONNECTED) {
+    ESP.deepSleep(1000000 * 60); // sleep for a min then reboot
+    delay(5000);
+  }  
 }
 
 void setup() {
@@ -1177,23 +1176,6 @@ void setup() {
   if (!safeMode) fsConfig(); // read node config from FS
 
   // init wifimanager library and network connection
-#ifndef _MINI 
-  WiFiManager wifiManager;
-
-  wifiManager.setDebugOutput(hasSerial); // set or disable serial debug
-  wifiManager.setTimeout(300);  // if autoconnect fails, wait for 5 minutes for user intervention before timeout
-
-  //fetches ssid and pass and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //and goes into a blocking loop awaiting configuration
-  if(!wifiManager.autoConnect()) {
-    // if sleeping is enabled, node might be battery powered, sleep for a bit after timeout
-    if (sleepEn) ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
-    // otherwise, just reboot
-    ESP.restart();
-  }
-#else // _MINI is true, so use wifimulti to save some space
-  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
   wifiMulti.addAP("dxTrailer", "2317239216");
   
   int cnt = 3000;
@@ -1201,10 +1183,8 @@ void setup() {
     delay(100); // give wifi 5 minutes to connect
   }  
 
-  if(wifiMulti.run() != WL_CONNECTED) {
-    ESP.restart(); // still no connection? reboot!
-  }
-#endif
+  testWiFi();
+
   WiFi.macAddress(mac); // get esp mac address, store it in memory, build fw update url
   sprintf(macStr,"%x%x%x%x%x%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   sprintf(theURL,"/iotfw?mac=%s", macStr);
@@ -1251,10 +1231,8 @@ void setup() {
     Wire.begin(iotSDA, iotSCL); // from api config file
 
     //Wire.begin(12, 14); // from api config file
-#ifndef _MINI
     i2c_scan();
     if (hasRGB) setupRGB();
-#endif
     if (hasIout) setupADS();
   }
   //sprintf(str,"owdat=%u",OWDAT);
@@ -1416,6 +1394,7 @@ void loop() {
   }
 
   doTick();
+  testWiFi(); // check WiFi connection
 
   if (hasRSSI) doRSSI();
   if (hasTout) doTout();
@@ -1440,32 +1419,26 @@ void loop() {
 
 #ifndef _MINI
     server.handleClient();
-    if (hasRGB) doRGB(); // rgb updates as fast as possible
 #endif
+    if (hasRGB) doRGB(); // rgb updates as fast as possible
     // webSocket.loop(); // loop no longer required with async client
 
     if (getTime) updateNTP(); // update time if requested by command
-#ifndef _MINI    
+
     if (doUpload) { // upload file to spiffs by command
+#ifndef _MINI
       doUpload = false; fileSet = false;
       int stat = uploadFile(fileName, fileURL);
       sprintf(str, "Upload complete: %s %d bytes.",fileName,stat);
       mqttPublish(mqttpub, str);
-    }
 #endif
+    }
 
     if (setPolo) {
       setPolo = false; // respond to an mqtt 'ping' of sorts
       mqttPublish(mqttpub, "Polo");
     }
 
-    if (resetWiFi) {
-#ifndef _MINI      
-      WiFiManager wifiManager;
-      wifiManager.resetSettings(); // purge stored WiFi settings
-      ESP.restart(); // and reboot
-#endif
-    }
 
     if (doReset) { // reboot on command
       mqttPublish(mqttpub, "Rebooting!");
@@ -1484,6 +1457,7 @@ void loop() {
     wsSend(myChr);
 
     ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
+    delay(5000); // provide time for esp to fall asleep
 
   }
   skipSleep = false;
