@@ -10,7 +10,7 @@
 #include <ArduinoOTA.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
-#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+//#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
 #include <ESP8266HTTPClient.h>
 #include <ESP8266httpUpdate.h>
 #include <ESP8266WebServer.h>
@@ -133,6 +133,7 @@ OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
 ESP8266WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
+ESP8266WiFiMulti wifiMulti;
 
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
  *  Lookup the IP address for the host name instead */
@@ -961,6 +962,7 @@ void mqttreconnect() {
   int retry = 0;
   if (mqttFail>=100) { // repeated mqtt failure could mean network trouble, reboot esp
     ESP.reset();
+    delay(5000); // give esp time to reset
   }
   while (!mqtt.connected()) {
     // Attempt to connect
@@ -1172,8 +1174,17 @@ void setup() {
 
   if (!safeMode) fsConfig(); // read node config from FS
 
-  // init wifimanager library and network connection
-  WiFiManager wifiManager;
+  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
+  wifiMulti.addAP("DXtrailer", "2317239216"); 
+
+  if(wifiMulti.run() == WL_CONNECTED) {
+    // connected, yay!    
+  } else {
+    delay(5000);
+    ESP.reset();
+    delay(5000);
+  }
+
 
   if (hasHostname) { // valid config found on FS, set network name
     WiFi.hostname(String(nodename)); // set network hostname
@@ -1181,21 +1192,9 @@ void setup() {
     MDNS.begin(nodename); // set mDNS hostname
   }
 
-  wifiManager.setDebugOutput(hasSerial); // set or disable serial debug
-  wifiManager.setTimeout(180);  // if autoconnect fails, wait for 3 minutes for user intervention before sleeping
-
   WiFi.macAddress(mac); // get esp mac address, store it in memory, build fw update url
   sprintf(macStr,"%x%x%x%x%x%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   sprintf(theURL,"/iotfw?mac=%s", macStr);
-
-
-  //fetches ssid and pass and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //here  "AutoConnectAP"
-  //and goes into a blocking loop awaiting configuration
-  if(!wifiManager.autoConnect("ESPSetup")) {
-    ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
-  }
 
   // request latest config from web api
   if (!safeMode) getConfig();
@@ -1383,10 +1382,18 @@ void runUpdate() { // test for http update flag, received url via mqtt
 
 void loop() {
   if (safeMode) { // safeMode engaged, enter blocking loop wait for an OTA update
-    while (true) {
+    int safeDelay=30000; // five minutes in 100ms counts
+    while (safeDelay--) {
       ArduinoOTA.handle();
-      delay(20);
+      delay(100);
     }
+    ESP.reset(); // restart, try again
+    delay(5000); // give esp time to reboot
+  }
+
+  if(wifiMulti.run() != WL_CONNECTED) { // reboot if wifi connection drops
+      ESP.reset();
+      delay(5000);
   }
 
   if (!mqtt.connected()) {
@@ -1442,6 +1449,7 @@ void loop() {
       }
       delay(50);
       ESP.reset();
+      delay(5000); // allow time for reboot
     }
 
     if (!hasRGB) delay(20); // don't delay for rgb controller
@@ -1456,6 +1464,7 @@ void loop() {
     }
 
     ESP.deepSleep(1000000 * sleepPeriod, WAKE_RF_DEFAULT); // sleep for 15 min
+    delay(5000); // give esp time to fall asleep
 
   }
   skipSleep = false;
