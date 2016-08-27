@@ -1177,15 +1177,17 @@ void setup() {
   wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
   wifiMulti.addAP("DXtrailer", "2317239216"); 
 
-  if(wifiMulti.run() == WL_CONNECTED) {
-    // connected, yay!    
-  } else {
-    delay(5000);
+  int wifiConnect = 240;
+  while ((wifiMulti.run() != WL_CONNECTED) && (wifiConnect-- > 0)) { // spend 2 minutes trying to connect to wifi
+    // connecting to wifi
+    delay(1000);
+  }
+
+  if (wifiMulti.run() != WL_CONNECTED ) { // still not connected? reboot!
     ESP.reset();
     delay(5000);
   }
-
-
+  
   if (hasHostname) { // valid config found on FS, set network name
     WiFi.hostname(String(nodename)); // set network hostname
     ArduinoOTA.setHostname(nodename);  // OTA hostname defaults to esp8266-[ChipID]
@@ -1430,6 +1432,7 @@ void loop() {
     if (hasRGB) doRGB(); // rgb updates as fast as possible
     if (scanI2C) i2c_scan();
     if (rgbTest) testRGB();
+
     if (doUpload) { // upload file to spiffs by command
       doUpload = false; fileSet = false;
       int stat = uploadFile(fileName, fileURL);
