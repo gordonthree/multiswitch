@@ -24,8 +24,8 @@
 #endif
 
 // uncomment for ac switch module, leave comment for dc switch module
-#define _ACMULTI true
-//#define _TRAILER true
+//#define _ACMULTI true
+#define _TRAILER true
 // owdat is set by json config now!
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
@@ -1188,8 +1188,11 @@ void setup() {
 
   if (!safeMode) fsConfig(); // read node config from FS
 
-  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
+#ifdef _TRAILER
   wifiMulti.addAP("DXtrailer", "2317239216");
+#else
+  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
+#endif
 
   int wifiConnect = 240;
   while ((wifiMulti.run() != WL_CONNECTED) && (wifiConnect-- > 0)) { // spend 2 minutes trying to connect to wifi
