@@ -24,8 +24,8 @@
 #endif
 
 // uncomment for ac switch module, leave comment for dc switch module
-#define _ACMULTI true
-//#define _TRAILER true
+//#define _ACMULTI true
+#define _TRAILER true
 // owdat is set by json config now!
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
@@ -67,7 +67,7 @@ char sw1label[32], sw2label[32], sw3label[32], sw4label[32];
 char nodename[32];
 char mqttserver[32];
 char vdivsor[8];
-int OWDAT=4; // default to pin 13 for onewire
+int OWDAT=-1; // 
 int  mqttport=0;
 char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
@@ -737,6 +737,7 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
   else if (strcmp(cmdTxt, "rgbtest")==0) rgbTest = true;
   else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
+  else if (strcmp(cmdTxt, "gettime")==0) getTime = true;
   else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
   else if (strcmp(cmdTxt, "green")==0) green = atoi(cmdVal);
   else if (strcmp(cmdTxt, "blue")==0) blue = atoi(cmdVal);
@@ -1188,8 +1189,11 @@ void setup() {
 
   if (!safeMode) fsConfig(); // read node config from FS
 
-  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
+#ifdef _TRAILER
   wifiMulti.addAP("DXtrailer", "2317239216");
+#else
+  wifiMulti.addAP("Tell my WiFi I love her", "2317239216");
+#endif
 
   int wifiConnect = 240;
   while ((wifiMulti.run() != WL_CONNECTED) && (wifiConnect-- > 0)) { // spend 2 minutes trying to connect to wifi
@@ -1230,10 +1234,11 @@ void setup() {
   // start the webserver
   server.onNotFound(handleNotFound);
   server.begin();
-#endif
   // Add service to MDNS-SD
   MDNS.addService("http", "tcp", 80);
+#endif
 
+  // start websockets server
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 
@@ -1241,8 +1246,11 @@ void setup() {
   setupOTA();
   setupMQTT();
 
-  // setup i2c if configured
-  if (hasI2C) {
+  // setup i2c if configured, basic sanity checking on configuration
+  if (hasI2C && iotSDA>=0 && iotSCL>=0 && iotSDA!=iotSCL) {
+    sprintf(str,"I2C SDA=%u SCL=%u", iotSDA, iotSCL);
+    mqtt.publish(mqttpub, str);
+
     Wire.begin(iotSDA, iotSCL); // from api config file
 
     //Wire.begin(12, 14); // from api config file
@@ -1255,8 +1263,10 @@ void setup() {
     if (hasIout) setupADS();
   }
 
-OWDAT = 4;
+  // OWDAT = 4;
   if (OWDAT>=0) { // setup onewire if data line is using pin 0 or greater
+    sprintf(str,"Onewire Data OWDAT=%u", OWDAT);
+    mqtt.publish(mqttpub, str);
     oneWire.begin(OWDAT);
     if (hasTout) {
       ds18b20 = DallasTemperature(&oneWire);
