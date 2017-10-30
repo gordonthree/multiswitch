@@ -87,7 +87,8 @@ int sleepPeriod = 900;
 int vccOffset = 0;
 int ACSoffset = 1641;
 int updateRate = 30;
-unsigned int red=0,green=0,blue=0,white=0;
+time_t oldEpoch = 0;
+uint8_t red=0,green=0,blue=0,white=0;
 unsigned char updateCnt = 0;
 unsigned char newWScon = 0;
 unsigned char mqttFail = 0;
@@ -145,6 +146,7 @@ OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
 WebSocketsServer webSocket = WebSocketsServer(81);
 ESP8266WiFiMulti wifiMulti;
+PCA9633 rgbw; // instance of pca9633 library
 
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
  *  Lookup the IP address for the host name instead */
@@ -279,7 +281,7 @@ void httpUpdater() {
         break;
 
       case HTTP_UPDATE_NO_UPDATES:
-        if (useMQTT) mqtt.publish(mqttpub, "No FW update available");
+        if (useMQTT && !hasRGB) mqtt.publish(mqttpub, "No FW update available");
         delay(10);
         break;
 
@@ -1070,7 +1072,8 @@ void wsData() { // send some websockets data if client is connected
   if (wsConcount<=0) return;
 
   if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
-  else if (!hasRGB) wsSwitchstatus(); // regular upgrades for other node types
+  else if (!hasRGB) wsSwitchstatus(); // regular updates for other node types
+
 
   if (hasRGB) return; // stop here if we're an rgb controller
 
@@ -1102,19 +1105,22 @@ void wsData() { // send some websockets data if client is connected
 }
 
 void mqttSendTime(time_t _time) {
-  if (hasRGB) return; // feature disabled if we're an rgb controller
+  // if (hasRGB) return; // feature disabled if we're an rgb controller
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
+  if (_time <= oldEpoch) return; // don't bother if it's been less than 1 second
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
   mqtt.publish(mqttpub, str);
+  oldEpoch = _time;
 }
 
 void mqttData() { // send mqtt messages as required
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
+  if (timeStatus() == timeSet) mqttSendTime(now());
+
   if (hasRGB) return; // feature disabled if we're an rgb controller
   if (hasTout) mqtt.publish(mqttpub, tmpChr);
 
-  if (timeStatus() == timeSet) mqttSendTime(now());
 
   if (hasIout) {
     mqtt.publish(mqttpub, amps0Chr);
@@ -1142,23 +1148,23 @@ void mqttData() { // send mqtt messages as required
 #ifndef _MINI
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
-  pwm.setPWM(0, 0, red);
-  pwm.setPWM(1, 0, blue);
-  pwm.setPWM(2, 0, green);
-  pwm.setPWM(3, 0, white);
+  rgbw.setpwm(0, red);
+  rgbw.setpwm(1, green);
+  rgbw.setpwm(2, blue);
+  rgbw.setpwm(3, white);
 }
 
 void testRGB() {
-  red=4096; blue=0; green=0; white=0;
+  red=255; blue=0; green=0; white=0;
   doRGB();
   delay(250);
-  red=0; blue=4096; green=0; white=0;
+  red=0; blue=255; green=0; white=0;
   doRGB();
   delay(250);
-  red=0; blue=0; green=4096; white=0;
+  red=0; blue=0; green=255; white=0;
   doRGB();
   delay(250);
-  red=0; blue=0; green=0; white=4096;
+  red=0; blue=0; green=0; white=255;
   doRGB();
   delay(250);
   red=0; blue=0; green=0; white=0;
@@ -1166,16 +1172,14 @@ void testRGB() {
   rgbTest = false;
 }
 
-void setupRGB() { // init pca9685 pwm chip
-  pwm.begin(); // default address is 40
-  pwm.setPWMFreq(200);  // This is the maximum PWM frequency
+void setupRGB() { // init pca9633 pwm chip
+  // pwm.begin(); // default address is 40
+  // pwm.setPWMFreq(200);  // This is the maximum PWM frequency
+  rgbw.begin(0x62); // TODO this should be set from config?
 
-  // set all 16 channels on pwm chip to 0,0 - full off
-  for (uint8_t i=0; i<16; i++) {
-    pwm.setPWM(i, 0, 0);
-    delay(10);
-  }
-  testRGB();
+  // set all 4 channels off, just for kicks
+  rgbw.setrgbw(0,0,0,0);
+
 }
 #endif
 
@@ -1300,7 +1304,7 @@ void setup() {
   }
 
   // OWDAT = 4;
-  if (OWDAT>=0) { // setup onewire if data line is using pin 0 or greater
+  if (OWDAT>0) { // setup onewire if data line is using pin 1 or greater
     sprintf(str,"Onewire Data OWDAT=%u", OWDAT);
     mqtt.publish(mqttpub, str);
     oneWire.begin(OWDAT);
@@ -1441,8 +1445,10 @@ void doIout() { // enable current reporting if module is so equipped
 void runUpdate() { // test for http update flag, received url via mqtt
   doUpdate = false; // clear flag
   updateCnt = 0; // clear update counter
-  if (useMQTT) mqtt.publish(mqttpub, "Checking for updates");
-  if (useMQTT) mqtt.loop();
+  if (useMQTT && !hasRGB) {
+    mqtt.publish(mqttpub, "Checking for updates");
+    mqtt.loop();
+  }
   delay(50);
   getConfig();
   httpUpdater();
@@ -1479,7 +1485,7 @@ void loop() {
   if ( (doUpdate) || (updateCnt>= 60 / ((updateRate * 20) / 1000) ) ) runUpdate(); // check for config update as requested or every 60 loops
 
   if (wsConcount>0) wsData();
-  if (useMQTT) mqttData();
+  if (useMQTT) mqttData(); // regular update for non RGB controllers
 
   sprintf(str,"Sleeping in %u seconds.", (updateRate*20/1000));
   if ((!skipSleep) && (sleepEn)) {
