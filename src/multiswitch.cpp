@@ -39,7 +39,7 @@
   #define _OFF 0
 // ADC_MODE(ADC_VCC); // added for outdoor probe
 // #define OWDAT 13 // dc nodes are usualy using 13 for owdat, outdoor probes use 4
-  //ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
+// ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
 #endif
 
 #ifdef _TRAILER // iot node for rv application
