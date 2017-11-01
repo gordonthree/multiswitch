@@ -139,7 +139,7 @@ time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 
 #ifndef _MINI
 ESP8266WebServer server(80);
-Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+//Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 #endif
 Adafruit_ADS1115 ads;
 WiFiClient espClient;
@@ -483,7 +483,7 @@ int loadConfig(bool setFSver) {
   altAdcvbat = json["altadcvbat"];
   hasFan = json["hasfan"];
   hasDimmer = json["hasdimmer"];
-  
+
   if (firstBoot) { // only do this at startup, resetting switches to database values
     // setup switch pins
     sw1 = json["sw1pin"];
