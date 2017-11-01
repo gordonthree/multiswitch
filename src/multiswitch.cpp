@@ -16,6 +16,7 @@
 #include <PubSubClient.h>
 #include "OneWire.h"
 #include "DallasTemperature.h"
+#include <pca9633.h>
 #include <Adafruit_ADS1015.h>
 #include <Wire.h>
 #ifndef _MINI
@@ -38,7 +39,7 @@
   #define _OFF 0
 // ADC_MODE(ADC_VCC); // added for outdoor probe
 // #define OWDAT 13 // dc nodes are usualy using 13 for owdat, outdoor probes use 4
-  //ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
+// ADC_MODE(ADC_VCC); // add for outdoor probe, rgbled module
 #endif
 
 #ifdef _TRAILER // iot node for rv application
@@ -86,10 +87,13 @@ int sleepPeriod = 900;
 int vccOffset = 0;
 int ACSoffset = 1641;
 int updateRate = 30;
-unsigned int red=0,green=0,blue=0,white=0;
+time_t oldEpoch = 0;
+uint8_t red=0,green=0,blue=0,white=0;
 unsigned char updateCnt = 0;
 unsigned char newWScon = 0;
 unsigned char mqttFail = 0;
+unsigned char speedAddr = 0; // i2c address for speed control chip
+unsigned char fanSpeed=0, fanDirection=0;
 int sw1 = -1, sw2 = -1, sw3 = -1, sw4 = -1;
 bool altAdcvbat = false;
 bool safeMode = false;
@@ -145,6 +149,7 @@ OneWire oneWire;
 DallasTemperature ds18b20 = NULL;
 WebSocketsServer webSocket = WebSocketsServer(81);
 ESP8266WiFiMulti wifiMulti;
+PCA9633 rgbw; // instance of pca9633 library
 
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
  *  Lookup the IP address for the host name instead */
@@ -245,7 +250,7 @@ void i2c_scan() {
   byte error, address;
   int nDevices;
 
-  if (!useMQTT) mqtt.publish(mqttpub, "Scanning I2C Bus...");
+  if (useMQTT) mqtt.publish(mqttpub, "Scanning I2C Bus...");
 
   nDevices = 0;
   for(address = 1; address < 127; address++ ) {
@@ -258,7 +263,7 @@ void i2c_scan() {
     if (error == 0) {
       sprintf(str,"i2c dev %d: %x", nDevices, address);
       wsSend(str);
-      if (!useMQTT) {
+      if (useMQTT) {
         mqtt.publish(mqttpub, str);
         mqtt.loop();
       }
@@ -266,7 +271,7 @@ void i2c_scan() {
       nDevices++;
     }
   }
-  if (!useMQTT) mqtt.publish(mqttpub, "I2C scan complete.");
+  if (useMQTT) mqtt.publish(mqttpub, "I2C scan complete.");
 }
 
 void httpUpdater() {
@@ -279,7 +284,7 @@ void httpUpdater() {
         break;
 
       case HTTP_UPDATE_NO_UPDATES:
-        if (useMQTT) mqtt.publish(mqttpub, "No FW update available");
+        if (useMQTT && !hasRGB) mqtt.publish(mqttpub, "No FW update available");
         delay(10);
         break;
 
@@ -387,6 +392,18 @@ void stopCh2() { // setup channel 2
   }
 }
 
+void speedControl(uint8_t fanSpeed, uint8_t fanDirection) {
+  if (!hasI2C) return; // bail out if i2c not setup
+
+  sprintf(str,"Fan %u dir %u speed %u", speedAddr, fanDirection, fanSpeed);
+  if (useMQTT) mqtt.publish(mqttpub, str);
+
+  if (speedAddr>0) {
+    i2c_write(speedAddr, 0x03, fanDirection);
+    delay(10);
+    i2c_write(speedAddr, 0x00, fanSpeed);
+  }
+}
 
 int loadConfig(bool setFSver) {
   int ver = -1;
@@ -451,6 +468,7 @@ int loadConfig(bool setFSver) {
   hasVout = json["hasvout"];
   hasIout = json["hasiout"];
   hasSpeed = json["hasspeed"];
+  speedAddr = json["speedaddr"];
   hasRSSI = json["hasrssi"];
   hasTpwr = json["hastpwr"]; // also serves as OWPWR
   OWDAT = json["owdat"]; // set onewire data pin
@@ -534,6 +552,7 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
     if (sw1type==0) strcpy(labelStr,"switch\0");
     else if (sw1type==1) strcpy(labelStr,"label\0");
     else if (sw1type==2) strcpy(labelStr,"rgb\0");
+    else if (sw1type>=8) strcpy(labelStr,"fan\0");
     sprintf(str,"%s=%s",labelStr, sw1label);
     webSocket.sendTXT(_num, str);
   }
@@ -745,6 +764,8 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
   else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
   else if (strcmp(cmdTxt, "gettime")==0) getTime = true;
+  else if (strcmp(cmdTxt, "fanspd")==0) fanSpeed = atoi(cmdVal);
+  else if (strcmp(cmdTxt, "fandir")==0) fanDirection = atoi(cmdVal);
   else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
   else if (strcmp(cmdTxt, "green")==0) green = atoi(cmdVal);
   else if (strcmp(cmdTxt, "blue")==0) blue = atoi(cmdVal);
@@ -1034,8 +1055,6 @@ void setupMQTT() {
   }
 }
 
-
-
 void updateNTP() {
   getTime = false;
   time_t epoch = getNtptime();
@@ -1047,11 +1066,22 @@ void updateNTP() {
   }
 }
 
+void doSpeedout() {
+    sprintf(str,"fanspd=%u", fanSpeed);
+    if (useMQTT) mqtt.publish(mqttpub, str);
+    wsSend(str);
+    sprintf(str,"fandir=%u", fanDirection);
+    if (useMQTT) mqtt.publish(mqttpub, str);
+    wsSend(str);
+}
+
 void wsData() { // send some websockets data if client is connected
   if (wsConcount<=0) return;
 
   if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
   else if (!hasRGB) wsSwitchstatus(); // regular updates for other node types
+
+  if (hasRGB) return; // stop here if we're an rgb controller
 
   if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
 
@@ -1061,6 +1091,7 @@ void wsData() { // send some websockets data if client is connected
   }
 
   if (hasRSSI) wsSend(rssiChr); // send rssi info
+  if (hasSpeed) doSpeedout();
 
   if (hasTout) wsSend(tmpChr); // send temperature
 
@@ -1081,17 +1112,24 @@ void wsData() { // send some websockets data if client is connected
 }
 
 void mqttSendTime(time_t _time) {
+  // if (hasRGB) return; // feature disabled if we're an rgb controller
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
+  if (_time <= oldEpoch) return; // don't bother if it's been less than 1 second
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
   mqtt.publish(mqttpub, str);
+  oldEpoch = _time;
 }
 
 void mqttData() { // send mqtt messages as required
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
-  if (hasTout) mqtt.publish(mqttpub, tmpChr);
 
   if (timeStatus() == timeSet) mqttSendTime(now());
+
+  if (hasRGB) return; // feature disabled if we're an rgb controller
+
+  if (hasTout) mqtt.publish(mqttpub, tmpChr);
+
 
   if (hasVout) {
     mqtt.publish(mqttpub, voltsChr);
@@ -1113,28 +1151,36 @@ void mqttData() { // send mqtt messages as required
     sprintf(str,"raw2=%d", raw2);
     if (rawadc) mqtt.publish(mqttpub, str);
   }
+
+  if (hasVout) {
+    mqtt.publish(mqttpub, voltsChr);
+    if (rawadc) mqtt.publish(mqttpub, adcChr);
+  }
+
+  if (hasRSSI) mqtt.publish(mqttpub, rssiChr);
+  if (hasSpeed) doSpeedout();
 }
 
 #ifndef _MINI
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
-  pwm.setPWM(0, 0, red);
-  pwm.setPWM(1, 0, green);
-  pwm.setPWM(2, 0, blue);
-  pwm.setPWM(3, 0, white);
+  rgbw.setpwm(0, red);
+  rgbw.setpwm(1, green);
+  rgbw.setpwm(2, blue);
+  rgbw.setpwm(3, white);
 }
 
 void testRGB() {
-  red=4096; blue=0; green=0; white=0;
+  red=255; blue=0; green=0; white=0;
   doRGB();
   delay(250);
-  red=0; blue=4096; green=0; white=0;
+  red=0; blue=255; green=0; white=0;
   doRGB();
   delay(250);
-  red=0; blue=0; green=4096; white=0;
+  red=0; blue=0; green=255; white=0;
   doRGB();
   delay(250);
-  red=0; blue=0; green=0; white=4096;
+  red=0; blue=0; green=0; white=255;
   doRGB();
   delay(250);
   red=0; blue=0; green=0; white=0;
@@ -1142,16 +1188,14 @@ void testRGB() {
   rgbTest = false;
 }
 
-void setupRGB() { // init pca9685 pwm chip
-  pwm.begin(); // default address is 40
-  pwm.setPWMFreq(200);  // This is the maximum PWM frequency
+void setupRGB() { // init pca9633 pwm chip
+  // pwm.begin(); // default address is 40
+  // pwm.setPWMFreq(200);  // This is the maximum PWM frequency
+  rgbw.begin(0x62); // TODO this should be set from config?
 
-  // set all 16 channels on pwm chip to 0,0 - full off
-  for (uint8_t i=0; i<16; i++) {
-    pwm.setPWM(i, 0, 0);
-    delay(10);
-  }
-  testRGB();
+  // set all 4 channels off, just for kicks
+  rgbw.setrgbw(0,0,0,0);
+
 }
 #endif
 
@@ -1159,6 +1203,13 @@ void setupADS() {
   ads.begin();
   ads.setGain(GAIN_ONE);
   ads.setSPS(ADS1115_DR_64SPS);
+}
+
+void setupSpeed() {
+  speedAddr = sw1type;
+  sprintf(str,"Fan speed control enabled, using device %u.", speedAddr);
+  mqtt.publish(mqttpub, str);
+  speedControl(0,0); // direction 0, speed 0
 }
 
 void setup() {
@@ -1252,7 +1303,7 @@ void setup() {
 
   // setup i2c if configured, basic sanity checking on configuration
   if (hasI2C && iotSDA>=0 && iotSCL>=0 && iotSDA!=iotSCL) {
-    sprintf(str,"I2C SDA=%u SCL=%u", iotSDA, iotSCL);
+    sprintf(str,"I2C enabled, using SDA=%u SCL=%u", iotSDA, iotSCL);
     mqtt.publish(mqttpub, str);
 
     Wire.begin(iotSDA, iotSCL); // from api config file
@@ -1265,10 +1316,11 @@ void setup() {
 #endif
 
     if (hasIout) setupADS();
+    if (hasSpeed) setupSpeed();
   }
 
   // OWDAT = 4;
-  if (OWDAT>=0) { // setup onewire if data line is using pin 0 or greater
+  if (OWDAT>0) { // setup onewire if data line is using pin 1 or greater
     sprintf(str,"Onewire Data OWDAT=%u", OWDAT);
     mqtt.publish(mqttpub, str);
     oneWire.begin(OWDAT);
@@ -1354,6 +1406,9 @@ void doTout() {
   vStr.toCharArray(tmpChr, vStr.length()+1);
 }
 
+void doSpeed() {
+  speedControl(fanSpeed, fanDirection);
+}
 
 void doIout() { // enable current reporting if module is so equipped
   if (hasRGB) return; // feature disabled if we're an rgb controller
@@ -1414,8 +1469,10 @@ void doIout() { // enable current reporting if module is so equipped
 void runUpdate() { // test for http update flag, received url via mqtt
   doUpdate = false; // clear flag
   updateCnt = 0; // clear update counter
-  if (useMQTT) mqtt.publish(mqttpub, "Checking for updates");
-  if (useMQTT) mqtt.loop();
+  if (useMQTT && !hasRGB) {
+    mqtt.publish(mqttpub, "Checking for updates");
+    mqtt.loop();
+  }
   delay(50);
   getConfig();
   httpUpdater();
@@ -1448,11 +1505,12 @@ void loop() {
   if (hasVout) doVout();
   if (hasIout) doIout();
   if (getRGB) doRGBout();
+  if (hasSpeed) doSpeed();
 
   if ( (doUpdate) || (updateCnt>= 60 / ((updateRate * 20) / 1000) ) ) runUpdate(); // check for config update as requested or every 60 loops
 
   if (wsConcount>0) wsData();
-  if (useMQTT) mqttData();
+  if (useMQTT) mqttData(); // regular update for non RGB controllers
 
   sprintf(str,"Sleeping in %u seconds.", (updateRate*20/1000));
   if ((!skipSleep) && (sleepEn)) {
