@@ -2,7 +2,6 @@
 #include <ArduinoJson.h>
 #include <Time.h>
 #include <FS.h>
-#include <Arduino.h>
 #include <ESP8266mDNS.h>
 #include <WebSocketsServer.h>
 #include <Hash.h>
@@ -21,7 +20,7 @@
 #include <Wire.h>
 #ifndef _MINI
 #include <ESP8266WebServer.h>
-#include <Adafruit_PWMServoDriver.h>
+//#include <Adafruit_PWMServoDriver.h>
 #endif
 
 // uncomment for ac switch module, leave comment for dc switch module
