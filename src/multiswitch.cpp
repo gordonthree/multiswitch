@@ -67,7 +67,7 @@ char sw1label[32], sw2label[32], sw3label[32], sw4label[32];
 char nodename[32];
 char mqttserver[32];
 char vdivsor[8];
-int OWDAT=-1; // 
+int OWDAT=-1; //
 int  mqttport=0;
 char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
@@ -103,6 +103,7 @@ bool clientCon = false; // flag for websock connection
 bool useMQTT = false; // flag for mqtt available
 bool setPolo = false;
 bool doUpdate = false;
+bool getRGB = false;
 bool skipSleep = false; // skip next sleep cycle
 bool sleepEn = false; // disable sleep entirely
 bool useGetvcc = false; // use internal divider network
@@ -111,6 +112,8 @@ bool hasIout = false; // output ADS current readings
 bool hasVout = false; // output voltage / onboard adc
 bool hasSpeed = false; // has pwm speed control chip (unimplemented)
 bool hasRSSI = false; // output RSSI
+bool hasFan = false; // flag for fan controller
+bool hasDimmer = false; // flag for pwm dimming support
 unsigned char hasTpwr = false; // has dallas power control (pin number)
 bool hasI2C = false; // has i2c bus
 bool hasI2Cpwr = false; // has i2c bus power control
@@ -149,7 +152,7 @@ IPAddress timeServerIP; // time.nist.gov NTP server address
 unsigned int localPort = 2390;      // local port to listen for UDP packets
 const char* ntpServerName = "us.pool.ntp.org";
 const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
+byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
 
 // A UDP instance to let us send and receive packets over UDP
 WiFiUDP udp;
@@ -461,7 +464,9 @@ int loadConfig(bool setFSver) {
   vccOffset = json["vccoffset"];
   updateRate = json["updaterate"];
   altAdcvbat = json["altadcvbat"];
-
+  hasFan = json["hasfan"];
+  hasDimmer = json["hasdimmer"];
+  
   if (firstBoot) { // only do this at startup, resetting switches to database values
     // setup switch pins
     sw1 = json["sw1pin"];
@@ -519,8 +524,9 @@ byte checkSw(byte pin) {
 
 void wsSendlabels(byte _x) { // send switch labels only to newly connected websocket client
   int _num = _x - 1; // client number is one less
+  if (_num==0) return;
   memset(str,0,sizeof(str));
-  sprintf(str,"sent # %d labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",_num,sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
+  sprintf(str,"sent %d labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",_num,sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
   if (useMQTT) mqtt.publish(mqttpub, str);
   wsSend(str);
   char labelStr[8];
@@ -734,6 +740,7 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
 
   if (strcmp(cmdTxt, "marco")==0) setPolo = true;
   else if (strcmp(cmdTxt, "update")==0) doUpdate = true;
+  else if (strcmp(cmdTxt, "getrgb")==0) getRGB = true;
   else if (strcmp(cmdTxt, "rgbtest")==0) rgbTest = true;
   else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
@@ -1044,9 +1051,7 @@ void wsData() { // send some websockets data if client is connected
   if (wsConcount<=0) return;
 
   if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
-  else if (!hasRGB) wsSwitchstatus(); // regular upgrades for other node types
-
-  if (hasRGB) return; // stop here if we're an rgb controller
+  else if (!hasRGB) wsSwitchstatus(); // regular updates for other node types
 
   if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
 
@@ -1055,8 +1060,9 @@ void wsData() { // send some websockets data if client is connected
     if (rawadc) wsSend(adcChr);
   }
 
-  if (hasTout) wsSend(tmpChr); // send temperature
   if (hasRSSI) wsSend(rssiChr); // send rssi info
+
+  if (hasTout) wsSend(tmpChr); // send temperature
 
   if (hasIout) { // send readings from ADC
     sprintf(str,"raw0=%d", raw0);
@@ -1075,7 +1081,6 @@ void wsData() { // send some websockets data if client is connected
 }
 
 void mqttSendTime(time_t _time) {
-  if (hasRGB) return; // feature disabled if we're an rgb controller
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
   memset(str,0,sizeof(str));
   sprintf(str,"time=%d", _time);
@@ -1084,10 +1089,16 @@ void mqttSendTime(time_t _time) {
 
 void mqttData() { // send mqtt messages as required
   if (!mqtt.connected()) return; // bail out if there's no mqtt connection
-  if (hasRGB) return; // feature disabled if we're an rgb controller
   if (hasTout) mqtt.publish(mqttpub, tmpChr);
 
   if (timeStatus() == timeSet) mqttSendTime(now());
+
+  if (hasVout) {
+    mqtt.publish(mqttpub, voltsChr);
+    if (rawadc) mqtt.publish(mqttpub, adcChr);
+  }
+
+  if (hasRSSI) mqtt.publish(mqttpub, rssiChr);
 
   if (hasIout) {
     mqtt.publish(mqttpub, amps0Chr);
@@ -1102,21 +1113,14 @@ void mqttData() { // send mqtt messages as required
     sprintf(str,"raw2=%d", raw2);
     if (rawadc) mqtt.publish(mqttpub, str);
   }
-
-  if (hasVout) {
-    mqtt.publish(mqttpub, voltsChr);
-    if (rawadc) mqtt.publish(mqttpub, adcChr);
-  }
-
-  if (hasRSSI) mqtt.publish(mqttpub, rssiChr);
 }
 
 #ifndef _MINI
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
   pwm.setPWM(0, 0, red);
-  pwm.setPWM(1, 0, blue);
-  pwm.setPWM(2, 0, green);
+  pwm.setPWM(1, 0, green);
+  pwm.setPWM(2, 0, blue);
   pwm.setPWM(3, 0, white);
 }
 
@@ -1286,10 +1290,7 @@ void setup() {
   }
 }
 
-
-
 void doVout() {
-  if (hasRGB) return; // feature disabled if we're an rgb controller
   int vBat=vccOffset;
   float voltage=0.00;
   String vStr;
@@ -1309,6 +1310,18 @@ void doVout() {
   vStr.toCharArray(voltsChr, vStr.length()+1);
 }
 
+void doRGBout() {
+  if(hasRGB) {
+  	memset(str,0,sizeof(str));
+  	sprintf(str, "red=%u,green=%u,blue=%u,white=%u", red, green, blue, white);
+  	mqtt.publish(mqttpub, str);
+  	wsSend(str);
+  } else {
+	mqtt.publish("RGB support not enabled.", str);
+  }
+  getRGB=false;
+
+}
 void doRSSI() {
   int rssi = WiFi.RSSI();
   memset(rssiChr,0,sizeof(rssiChr));
@@ -1316,7 +1329,6 @@ void doRSSI() {
 }
 
 void doTout() {
-  if (hasRGB) return; // feature disabled if we're an rgb controller
   String vStr;
   memset(tmpChr,0,sizeof(tmpChr));
   if (hasTpwr>0) {
@@ -1435,6 +1447,7 @@ void loop() {
   if (hasTout) doTout();
   if (hasVout) doVout();
   if (hasIout) doIout();
+  if (getRGB) doRGBout();
 
   if ( (doUpdate) || (updateCnt>= 60 / ((updateRate * 20) / 1000) ) ) runUpdate(); // check for config update as requested or every 60 loops
 
