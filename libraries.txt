@@ -1,0 +1,15 @@
+PubSubClient
+ADS1X15 (not adafruit version)
+ESP8266mDNS
+ESP8266httpUpdate
+ESP8266WebServer
+ESP8266HTTPClient
+Wire
+OneWire
+Hash
+pca9633
+Time
+ArduinoJson
+Websockets
+DallasTemperature (my version)
+ArduinoOTA

@@ -125,6 +125,7 @@ bool doReset = false; // flag for reboot
 bool hasHostname = false; // flag for hostname being set by saved config
 bool scanI2C = false;
 bool rgbTest = false;
+bool prtConfig = false; // flag to request config print via mqtt
 unsigned char ntpOffset = 4; // offset from GMT
 uint8_t iotSDA = 12, iotSCL = 14; // i2c bus pins
 
@@ -138,7 +139,7 @@ time_t ch3start = 0, ch3end = 0, ch3rest = 0;
 time_t ch4start = 0, ch4end = 0, ch4rest = 0;
 
 #ifndef _MINI
-ESP8266WebServer server(80);
+ESP8266WebServer httpd(80);
 //Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 #endif
 Adafruit_ADS1115 ads;
@@ -482,7 +483,7 @@ int loadConfig(bool setFSver) {
   updateRate = json["updaterate"];
   altAdcvbat = json["altadcvbat"];
   hasFan = json["hasfan"];
-  hasDimmer = json["hasdimmer"];
+  //hasDimmer = json["hasdimmer"];
 
   if (firstBoot) { // only do this at startup, resetting switches to database values
     // setup switch pins
@@ -539,11 +540,12 @@ byte checkSw(byte pin) {
 
 
 
-void wsSendlabels(byte _x) { // send switch labels only to newly connected websocket client
-  int _num = _x - 1; // client number is one less
-  if (_num==0) return;
+void wsSendlabels(uint8_t _num) { // send switch labels only to newly connected websocket client
+  // uint8_t _num = _x - 1; // client number is one less
+  // if (useMQTT) mqtt.publish(mqttpub, "wsSendlabels");
+  // if (_num == 0) return;
   memset(str,0,sizeof(str));
-  sprintf(str,"sent %d labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",_num,sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
+  sprintf(str,"sending labels: sw1=%d %d sw2=%d %d sw3=%d %d sw4=%d %d",sw1,sw1type,sw2,sw2type,sw3,sw3type,sw4,sw4type);
   if (useMQTT) mqtt.publish(mqttpub, str);
   wsSend(str);
   char labelStr[8];
@@ -553,30 +555,30 @@ void wsSendlabels(byte _x) { // send switch labels only to newly connected webso
     else if (sw1type==2) strcpy(labelStr,"rgb\0");
     else if (sw1type>=8) strcpy(labelStr,"fan\0");
     sprintf(str,"%s=%s",labelStr, sw1label);
-    webSocket.sendTXT(_num, str);
+    wsSend(str);
   }
   if (sw2>=0) {
     if (sw2type==0) strcpy(labelStr,"switch\0");
     else if (sw2type==1) strcpy(labelStr,"label\0");
     else if (sw2type==2) strcpy(labelStr,"rgb\0");
     sprintf(str,"%s=%s",labelStr, sw2label);
-    webSocket.sendTXT(_num, str);
+    wsSend(str);
   }
   if (sw3>=0) {
     if (sw3type==0) strcpy(labelStr,"switch\0");
     else if (sw3type==1) strcpy(labelStr,"label\0");
     else if (sw3type==2) strcpy(labelStr,"rgb\0");
     sprintf(str,"%s=%s",labelStr, sw3label);
-    webSocket.sendTXT(_num, str);
+    wsSend(str);
   }
   if (sw4>=0) {
     if (sw4type==0) strcpy(labelStr,"switch\0");
     else if (sw4type==1) strcpy(labelStr,"label\0");
     else if (sw4type==2) strcpy(labelStr,"rgb\0");
     sprintf(str,"%s=%s",labelStr, sw4label);
-    webSocket.sendTXT(_num, str);
+    wsSend(str);
   }
-  i2c_scan();
+  // i2c_scan();
   newWScon = 0;
 }
 
@@ -763,6 +765,7 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
   else if (strcmp(cmdTxt, "scani2c")==0) scanI2C = true;
   else if (strcmp(cmdTxt, "reboot")==0) doReset = true;
   else if (strcmp(cmdTxt, "gettime")==0) getTime = true;
+  else if (strcmp(cmdTxt, "prtconfig")==0) prtConfig = true;
   else if (strcmp(cmdTxt, "fanspd")==0) fanSpeed = atoi(cmdVal);
   else if (strcmp(cmdTxt, "fandir")==0) fanDirection = atoi(cmdVal);
   else if (strcmp(cmdTxt, "red")==0) red = atoi(cmdVal);
@@ -815,7 +818,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       case WStype_DISCONNECTED:
           //USE_SERIAL.printf("[%u] Disconnected!\n", num);
           wsConcount--;
-          sprintf(str,"ws Disconnect count=%d",wsConcount);
+          sprintf(str,"ws disconnect count=%d",wsConcount);
           if (useMQTT) mqtt.publish(mqttpub,str);
           break;
       case WStype_CONNECTED:
@@ -836,7 +839,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
               //wsSendlabels();
               newWScon = num + 1;
               wsConcount++;
-              sprintf(str,"ws Connect count=%d",wsConcount);
+              sprintf(str,"ws connect count=%u new=%u",wsConcount,newWScon);
               if (useMQTT) mqtt.publish(mqttpub,str);
           }
           break;
@@ -873,8 +876,8 @@ bool loadFromSpiffs(String path){
   else if(path.endsWith(".pdf")) dataType = "application/pdf";
   else if(path.endsWith(".zip")) dataType = "application/zip";
   File dataFile = SPIFFS.open(path.c_str(), "r");
-  if (server.hasArg("download")) dataType = "application/octet-stream";
-  if (server.streamFile(dataFile, dataType) != dataFile.size()) {
+  if (httpd.hasArg("download")) dataType = "application/octet-stream";
+  if (httpd.streamFile(dataFile, dataType) != dataFile.size()) {
   }
 
   dataFile.close();
@@ -882,19 +885,19 @@ bool loadFromSpiffs(String path){
 }
 
 void handleNotFound(){
-  if(loadFromSpiffs(server.uri())) return;
+  if(loadFromSpiffs(httpd.uri())) return;
   String message = "File Not Found\n\n";
   message += "URI: ";
-  message += server.uri();
+  message += httpd.uri();
   message += "\nMethod: ";
-  message += (server.method() == HTTP_GET)?"GET":"POST";
+  message += (httpd.method() == HTTP_GET)?"GET":"POST";
   message += "\nArguments: ";
-  message += server.args();
+  message += httpd.args();
   message += "\n";
-  for (uint8_t i=0; i<server.args(); i++){
-    message += " NAME:"+server.argName(i) + "\n VALUE:" + server.arg(i) + "\n";
+  for (uint8_t i=0; i<httpd.args(); i++){
+    message += " NAME:"+httpd.argName(i) + "\n VALUE:" + httpd.arg(i) + "\n";
   }
-  server.send(404, "text/plain", message);
+  httpd.send(404, "text/plain", message);
   // Serial.println(message);
 }
 #endif
@@ -1077,12 +1080,13 @@ void doSpeedout() {
 void wsData() { // send some websockets data if client is connected
   if (wsConcount<=0) return;
 
-  if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
-  else if (!hasRGB) wsSwitchstatus(); // regular updates for other node types
-
-  if (hasRGB) return; // stop here if we're an rgb controller
+  // if (newWScon>0 && hasRGB) wsSwitchstatus(); // update switch status once for rgb controllers
+  //else if (!hasRGB) wsSwitchstatus(); // regular updates for other node types
+  wsSwitchstatus();
 
   if (timeStatus() == timeSet) wsSendTime("time=%d",now()); // send time to ws client
+
+  if (hasRGB) return; // stop here if we're an rgb controller
 
   if (hasVout) { // send bat/vcc string
     wsSend(voltsChr);
@@ -1160,7 +1164,7 @@ void mqttData() { // send mqtt messages as required
   if (hasSpeed) doSpeedout();
 }
 
-#ifndef _MINI
+
 void doRGB() { // send updated values to the first four channels of the pwm chip
   // need to expand this to support four 4-channel groups, some sort of array probably
   rgbw.setpwm(0, red);
@@ -1196,7 +1200,6 @@ void setupRGB() { // init pca9633 pwm chip
   rgbw.setrgbw(0,0,0,0);
 
 }
-#endif
 
 void setupADS() {
   ads.begin();
@@ -1209,6 +1212,15 @@ void setupSpeed() {
   sprintf(str,"Fan speed control enabled, using device %u.", speedAddr);
   mqtt.publish(mqttpub, str);
   speedControl(0,0); // direction 0, speed 0
+}
+
+void printConfig() { // print relevant config bits out to mqtt
+  if (hasFan) mqtt.publish(mqttpub, "Fan control enabled.");
+  if (hasRGB) mqtt.publish(mqttpub, "RGBW control enabled.");
+  if (hasRSSI) mqtt.publish(mqttpub, "RSSI reporting enabled.");
+  if (hasVout) mqtt.publish(mqttpub, "Voltage reporting enabled.");
+  if (hasTout) mqtt.publish(mqttpub, "Temperature reporting enabled.");
+  prtConfig=false;
 }
 
 void setup() {
@@ -1286,8 +1298,8 @@ void setup() {
 
 #ifndef _MINI
   // start the webserver
-  server.onNotFound(handleNotFound);
-  server.begin();
+  httpd.onNotFound(handleNotFound);
+  httpd.begin();
   // Add service to MDNS-SD
   MDNS.addService("http", "tcp", 80);
 #endif
@@ -1310,12 +1322,12 @@ void setup() {
     //Wire.begin(12, 14); // from api config file
     i2c_scan();
 
-#ifndef _MINI
-    if (hasRGB) setupRGB();
-#endif
+    printConfig();
 
+    if (hasRGB) setupRGB();
     if (hasIout) setupADS();
     if (hasSpeed) setupSpeed();
+
   }
 
   // OWDAT = 4;
@@ -1340,6 +1352,7 @@ void setup() {
     mqtt.publish(mqttpub, str);
   }
 }
+
 
 void doVout() {
   int vBat=vccOffset;
@@ -1371,8 +1384,8 @@ void doRGBout() {
 	mqtt.publish("RGB support not enabled.", str);
   }
   getRGB=false;
-
 }
+
 void doRSSI() {
   int rssi = WiFi.RSSI();
   memset(rssiChr,0,sizeof(rssiChr));
@@ -1510,6 +1523,7 @@ void loop() {
 
   if (wsConcount>0) wsData();
   if (useMQTT) mqttData(); // regular update for non RGB controllers
+  if (prtConfig) printConfig(); // config print was requested
 
   sprintf(str,"Sleeping in %u seconds.", (updateRate*20/1000));
   if ((!skipSleep) && (sleepEn)) {
@@ -1523,16 +1537,17 @@ void loop() {
     if (useMQTT) mqtt.loop();
 
 #ifndef _MINI
-    server.handleClient();
+    httpd.handleClient();
 #endif
     webSocket.loop();
 
     if (getTime) updateNTP(); // update time if requested by command
     if (scanI2C) i2c_scan();
 
-#ifndef _MINI
     if (hasRGB) doRGB(); // rgb updates as fast as possible
     if (rgbTest) testRGB();
+
+#ifndef _MINI
 
     if (doUpload) { // upload file to spiffs by command
       doUpload = false; fileSet = false;
