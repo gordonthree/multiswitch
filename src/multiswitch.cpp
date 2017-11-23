@@ -25,7 +25,7 @@
 
 // uncomment for ac switch module, leave comment for dc switch module
 //#define _ACMULTI true
-//#define _TRAILER true
+#define _TRAILER true
 // owdat is set by json config now!
 
 #ifdef _ACMULTI // driving relay modules, 0 is on, 1 is off
