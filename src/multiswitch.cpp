@@ -67,7 +67,7 @@ char sw1label[32], sw2label[32], sw3label[32], sw4label[32];
 char nodename[32];
 char mqttserver[32];
 char vdivsor[8];
-int OWDAT=-1; // 
+int OWDAT=-1; //
 int  mqttport=0;
 char mqttpub[100], mqttsub[100];
 char fwversion[6]; // storage for sketch image version
@@ -568,7 +568,6 @@ void wsSwitchstatus() {
     sprintf(swChr,"sw2=%u",ch2en);
     wsSend(swChr);
   }
-  wsSend(swChr);
   if (ch3en>=0) {
     sprintf(swChr,"sw3=%u",ch3en);
     wsSend(swChr);
@@ -778,6 +777,24 @@ void handleMsg(char* cmdStr) { // handle commands from mqtt broker
         ch2en = 0;
         stopCh2(); // OFF
         //wsSend("CH2 Manual Off");
+      }
+    }
+    else if (strcmp(cmdTxt, "ch3en")==0) {
+      if (i == 1) { // ON
+        ch3en=1;
+        digitalWrite(sw3, _ON); // nothing fancy for manual mode,
+      } else { // OFF
+        ch2en=0;
+        digitalWrite(sw3, _OFF); // nothing fancy for manual mode,
+      }
+    }
+    else if (strcmp(cmdTxt, "ch4en")==0) {
+      if (i == 1) { // ON
+        ch4en=1;
+        digitalWrite(sw4, _ON); // nothing fancy for manual mode,
+      } else { // OFF
+        ch4en=0;
+        digitalWrite(sw4, _OFF); // nothing fancy for manual mode,
       }
     }
   }
